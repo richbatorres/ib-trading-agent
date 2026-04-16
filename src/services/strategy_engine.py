@@ -64,7 +64,7 @@ class StrategyEngine:
         polymarket_sentiment: float = 0.0,
         earnings_blackout_symbols: Optional[Set[str]] = None,
         indicator_cache: Optional[IndicatorCache] = None,
-        market_data_type: int = 1,
+        market_data_type: str = "1",
     ) -> None:
         self._market_hours = market_hours
         self.polymarket_sentiment = polymarket_sentiment
@@ -72,7 +72,7 @@ class StrategyEngine:
             earnings_blackout_symbols if earnings_blackout_symbols is not None else set()
         )
         self._indicator_cache = indicator_cache
-        self._market_data_type = market_data_type  # 1=real-time, 3/4=delayed
+        self._market_data_type = market_data_type  # "1"=real-time, "3"/"4"=delayed, "yahoo"
 
         # Per-symbol previous indicator values for crossover detection
         self._prev_indicators: Dict[str, Dict[str, Any]] = {}
@@ -136,7 +136,7 @@ class StrategyEngine:
         # volume which is always larger than the average — skip the per-tick
         # volume check. For real-time data (type 1), apply the standard
         # 1.5× average volume threshold.
-        if self._market_data_type == 1:
+        if self._market_data_type == "1":
             if avg_daily_volume > 0 and volume < self._VOLUME_MULTIPLIER * avg_daily_volume:
                 logger.info(
                     "Signal rejected for %s: current volume %.0f < %.1f × avg volume %.0f (threshold %.0f)",

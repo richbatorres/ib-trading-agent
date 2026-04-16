@@ -57,16 +57,42 @@ def _remove_pid_file() -> None:
 async def _run_agent_loop(config: AgentConfig) -> None:
     """Main agent event loop — creates and starts the TradingAgent.
 
-    Initializes the TradingAgent with all components wired together,
-    then starts the ib_insync event loop.
+    Runs the startup sequence as async, then enters a blocking loop
+    that processes both IB events and asyncio tasks.
     """
+    from ib_insync import util as ib_util
     from src.agent import TradingAgent
 
     agent = TradingAgent(config)
     logger.info("Agent started — PID %d, environment=%s", os.getpid(), config.environment)
 
     try:
-        await agent.start()
+        await agent.initialize()
+        logger.info("Agent entering main loop")
+        ib = agent._connection_manager.ib
+        mdt = config.market_data_type
+
+        if mdt == "yahoo":
+            # Use Yahoo Finance for market data (free, no IB subscription needed)
+            from src.services.yahoo_data_provider import YahooDataProvider
+            yahoo = YahooDataProvider(agent._market_data._watchlist)
+            yahoo.set_tick_callback(agent._on_tick)
+            logger.info("Loading historical data from Yahoo Finance...")
+            loaded = yahoo.load_history()
+            logger.info("Yahoo: loaded history for %d symbols", loaded)
+
+            while ib.isConnected():
+                yahoo.poll()
+                ib.sleep(10)  # poll every 10 seconds
+        else:
+            # IB market data mode
+            mdt_int = int(mdt) if mdt.isdigit() else 4
+            while ib.isConnected():
+                if mdt_int in (3, 4):
+                    agent._market_data.poll_snapshots()
+                ib.sleep(5)
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Agent interrupted")
     finally:
         await agent.stop()
         _remove_pid_file()

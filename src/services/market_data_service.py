@@ -26,7 +26,7 @@ class MarketDataService:
     processed tick data to a registered callback.
     """
 
-    def __init__(self, ib: IB, watchlist: List[str], market_data_type: int = 4) -> None:
+    def __init__(self, ib: IB, watchlist: List[str], market_data_type: str = "4") -> None:
         self._ib = ib
         self._watchlist = watchlist
         self._market_data_type = market_data_type
@@ -52,9 +52,23 @@ class MarketDataService:
         Finally, wire ``pendingTickersEvent`` to :meth:`on_pending_tickers`.
         """
         # Set market data type from config:
-        # 1=real-time (paid), 3=delayed (free, ~15min lag), 4=frozen delayed (free)
-        self._ib.reqMarketDataType(self._market_data_type)
-        logger.info("Market data type set to %d", self._market_data_type)
+        # "1"=real-time (paid), "3"=delayed (free), "4"=frozen delayed (free), "yahoo"=skip
+        if self._market_data_type == "yahoo":
+            logger.info("Market data type: yahoo — skipping IB market data subscriptions")
+            # Still qualify contracts for order execution
+            for symbol in self._watchlist:
+                contract = Stock(symbol, "SMART", "USD")
+                qualified = await self._ib.qualifyContractsAsync(contract)
+                if qualified:
+                    self._contracts[symbol] = qualified[0]
+                    self._price_history[symbol] = deque(maxlen=_MAX_HISTORY_LEN)
+                    self._volume_history[symbol] = deque(maxlen=_MAX_HISTORY_LEN)
+            logger.info("Qualified %d contracts for order execution", len(self._contracts))
+            return
+
+        mdt_int = int(self._market_data_type) if self._market_data_type.isdigit() else 4
+        self._ib.reqMarketDataType(mdt_int)
+        logger.info("Market data type set to %d", mdt_int)
 
         for symbol in self._watchlist:
             contract = Stock(symbol, "SMART", "USD")
@@ -176,3 +190,43 @@ class MarketDataService:
         if history is None or len(history) == 0:
             return 0.0
         return float(np.mean(np.array(history, dtype=np.float64)))
+
+    def poll_snapshots(self) -> None:
+        """Poll snapshot prices for all watchlist symbols.
+
+        Uses reqHistoricalData for a 1-bar snapshot which works without
+        market data subscriptions. Called periodically by the agent's
+        main loop when streaming is not available.
+        """
+        for symbol, contract in self._contracts.items():
+            try:
+                bars = self._ib.reqHistoricalData(
+                    contract,
+                    endDateTime='',
+                    durationStr='300 S',
+                    barSizeSetting='1 min',
+                    whatToShow='MIDPOINT',
+                    useRTH=True,
+                    formatDate=1,
+                )
+                if not bars:
+                    continue
+
+                bar = bars[-1]  # most recent bar
+                price = float(bar.close)
+                volume = float(bar.volume)
+
+                self._price_history.setdefault(symbol, deque(maxlen=_MAX_HISTORY_LEN))
+                self._volume_history.setdefault(symbol, deque(maxlen=_MAX_HISTORY_LEN))
+
+                self._price_history[symbol].append(price)
+                self._volume_history[symbol].append(volume)
+
+                if self._callback is not None:
+                    prices_array = np.array(self._price_history[symbol], dtype=np.float64)
+                    volumes_array = np.array(self._volume_history[symbol], dtype=np.float64)
+                    avg_volume = float(np.mean(volumes_array)) if len(volumes_array) > 0 else 0.0
+                    self._callback(symbol, price, volume, prices_array, volumes_array, avg_volume)
+
+            except Exception as exc:
+                logger.debug("Snapshot poll failed for %s: %s", symbol, exc)

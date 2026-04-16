@@ -32,7 +32,7 @@ class AgentConfig:
     db_url: str = "sqlite:///data/agent.db"
     llm_model: str = "claude-sonnet-4-6"
     max_llm_calls_per_day: int = 10
-    market_data_type: int = 4  # 1=real-time, 3=delayed, 4=frozen delayed
+    market_data_type: str = "4"  # "1"=real-time, "3"=delayed, "4"=frozen, "yahoo"=Yahoo Finance
 
     @classmethod
     def from_env(cls, path: str = ".env") -> "AgentConfig":
@@ -76,5 +76,5 @@ class AgentConfig:
             db_url=values.get("DB_URL", "sqlite:///data/agent.db"),
             llm_model=values.get("LLM_MODEL", "claude-sonnet-4-6"),
             max_llm_calls_per_day=int(values.get("MAX_LLM_CALLS_PER_DAY", "10")),
-            market_data_type=int(values.get("MARKET_DATA_TYPE", "4")),
+            market_data_type=values.get("MARKET_DATA_TYPE", "4"),
         )

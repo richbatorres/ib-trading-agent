@@ -17,6 +17,10 @@ import numpy as np
 
 # Allow nested event loops — required for ib_insync's sleep() inside asyncio.run()
 nest_asyncio.apply()
+
+from ib_insync import util as ib_util
+# Patch asyncio to work with ib_insync
+ib_util.patchAsyncio()
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
@@ -101,7 +105,21 @@ class TradingAgent:
     # ------------------------------------------------------------------
 
     async def start(self) -> None:
-        """Execute the full startup sequence and run the event loop.
+        """Full startup + blocking event loop. Use initialize() + ib.run() for more control."""
+        await self.initialize()
+        # Blocking event loop — processes IB events
+        logger.info("TradingAgent fully started — entering event loop")
+        try:
+            while True:
+                await asyncio.sleep(0.1)
+        except (KeyboardInterrupt, SystemExit):
+            logger.info("Agent loop interrupted")
+
+    async def initialize(self) -> None:
+        """Execute the full startup sequence (non-blocking).
+
+        After calling this, use ib.run() or await asyncio.sleep() to
+        keep the agent running.
 
         Steps:
         a. Setup logging
@@ -126,7 +144,9 @@ class TradingAgent:
 
         # c. Connect to IB
         await self._connection_manager.connect()
-        logger.info("Connected to IB")
+        # Wait for IB to sync account data (positions, account values)
+        self._connection_manager.ib.sleep(3)
+        logger.info("Connected to IB (account data synced)")
 
         # d. Crash recovery
         last_state = await self._state_manager.load_last_state()
@@ -148,6 +168,51 @@ class TradingAgent:
         # e. Update market hours schedule
         await self._market_hours.update_schedule()
         logger.info("Market hours schedule updated")
+
+        # e1. Initialize portfolio from IB account values
+        ib = self._connection_manager.ib
+        account_values = ib.accountValues()
+        logger.info("IB account values count: %d", len(account_values))
+        # Log all available tags for debugging
+        seen_tags = set()
+        for av in account_values:
+            if av.tag not in seen_tags:
+                seen_tags.add(av.tag)
+        if seen_tags:
+            logger.info("Available account tags: %s", sorted(seen_tags)[:20])
+
+        total_value = 0.0
+        cash = 0.0
+        for av in account_values:
+            if av.tag == "NetLiquidation" and av.currency == "BASE":
+                total_value = float(av.value)
+            elif av.tag == "TotalCashBalance" and av.currency == "BASE":
+                cash = float(av.value)
+        # Fallback: if BASE currency not found, try USD
+        if total_value == 0:
+            for av in account_values:
+                if av.tag == "NetLiquidation" and av.currency == "USD":
+                    total_value = float(av.value)
+                elif av.tag == "CashBalance" and av.currency == "USD":
+                    cash = float(av.value)
+        # Fallback: use any NetLiquidation value
+        if total_value == 0:
+            for av in account_values:
+                if av.tag == "NetLiquidation":
+                    total_value = float(av.value)
+                    logger.info("Found NetLiquidation: %s %s", av.value, av.currency)
+                    break
+        if total_value > 0:
+            if cash == 0:
+                cash = total_value  # assume all cash if no positions
+            self._risk_manager.update_portfolio(total_value, cash)
+            logger.info(
+                "Portfolio initialized from IB: value=%.2f, cash=%.2f",
+                total_value, cash,
+            )
+        else:
+            logger.warning("Could not load portfolio from IB — setting default 1M")
+            self._risk_manager.update_portfolio(1_000_000.0, 1_000_000.0)
 
         # e2. Build filtered watchlist and check earnings blackout
         watchlist = await self._watchlist_manager.build_watchlist(_DEFAULT_WATCHLIST)
@@ -189,18 +254,7 @@ class TradingAgent:
         )
         await self._state_manager.persist_agent_state(agent_state)
         logger.info("Agent state persisted as RUNNING")
-
-        # k. Keep the agent running.
-        # ib_insync uses nest_asyncio to allow nested event loops.
-        # We use ib.sleep() directly which processes IB events and
-        # yields to the asyncio scheduler.
-        logger.info("TradingAgent fully started — entering event loop")
-        ib = self._connection_manager.ib
-        try:
-            while True:
-                ib.sleep(1)
-        except (KeyboardInterrupt, SystemExit):
-            logger.info("Agent loop interrupted")
+        logger.info("TradingAgent initialization complete")
 
     async def stop(self) -> None:
         """Delegate shutdown to the ShutdownHandler."""

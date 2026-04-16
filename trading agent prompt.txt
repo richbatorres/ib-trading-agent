@@ -1,0 +1,208 @@
+Napravi mi autonomnog AI trading agenta za Interactive Brokers platformu. 
+U nastavku su sve specifikacije.
+
+---
+
+## 1. PLATFORMA I OKRUŽENJE
+
+- Platforma: Interactive Brokers (postojeći račun)
+- API: Koristi Interactive Brokers TWS API ili IB Gateway za spajanje
+- Inicijalno okruženje: IB Paper Trading račun (testno okruženje) — agent 
+  MORA biti konfiguriran da radi isključivo na paper trading računu dok ga 
+  ručno ne prebacim na live račun
+- Buduće okruženje: live IB račun (prebacivanje mora biti jednostavno, 
+  idealno promjenom jedne konfiguracijske varijable)
+- Pokretanje: lokalno (Windows/Mac/Linux kućno računalo), s mogućnošću 
+  lakog prebacivanja na remote server (VPS/cloud) bez promjena u kodu
+- Instrument: isključivo dionice (stocks) — bez opcija, futures, forexа 
+  ili kriptovaluta za sada
+
+---
+
+## 2. KAPITAL I UPRAVLJANJE RIZIKOM
+
+- Inicijalni kapital: 50 EUR
+- Maksimalni ukupni gubitak (hard stop): 20% ukupnog portfolija — kada 
+  se dostigne, agent automatski zatvara sve pozicije i zaustavlja 
+  trgovanje dok ga ručno ne restartiram
+- Stop-loss po poziciji: maksimalno 5% gubitka po pojedinačnoj dionici
+- Maksimalna izloženost po dionici: maksimalno 25% ukupnog portfolija u 
+  jednoj dionici (diversifikacija)
+- Slobodan cash buffer: uvijek zadrži minimalno 10% portfolija u gotovini
+- Implementiraj trailing stop-loss mehanizam za zaštitu ostvarenih dobitaka
+- Prioritet #1: zaštita kapitala / Prioritet #2: maksimizacija zarade
+
+---
+
+3. Trading strategija
+Implementiraj sljedeće best-practice strategije, kombiniraj ih ovisno
+o tržišnim uvjetima:
+
+- Momentum trading: prati dionice s jakim kratkoročnim momentumom (RSI, MACD)
+- Mean reversion: detektiraj dionice prekomjerno odmakle od prosjeka (Bollinger Bands)
+- Volume analysis: visok volumen kao obavezna potvrda signala
+- Trend following: EMA crossover signali (9/21 EMA)
+- Izbjegavaj trade-ove neposredno prije/poslije earnings reporta
+- Trguj isključivo dionicama s prosječnim dnevnim volumenom > 500k dionica
+4. Tržišna analiza i brzina
+- Kontinuirano (real-time) praćenje tržišnih podataka putem IB API streaming-a
+- Analiza i odluka o trade-u mora se izvršiti što je brže moguće
+- Koristi asinkrono programiranje (async/await) i event-driven arhitekturu
+- Market hours awareness: NYSE/NASDAQ 9:30–16:00 ET — trguj samo u regularnim satima
+- Van tržišnih sati: prati vijesti i priprema watchlistu, ne izvršava trade-ove
+5. Polymarket integracija
+- Poveži se s Polymarket API-jem i prati prediktivne markete relevantne
+  za dioničko tržište (Fed odluke, politički rizici, makroekonomski eventi)
+- Implementiraj sentiment scoring na temelju Polymarket podataka
+- Polymarket signal koristi isključivo kao sekundarni faktor — nikad kao
+  jedini razlog za trade
+- Ažuriraj Polymarket podatke svakih 15 minuta
+6. Kontinuirani rad i crash recovery
+- Agent mora raditi 24/7 kao pozadinski servis/daemon
+- State persistence: spremi stanje u lokalnu bazu podataka (SQLite) nakon
+  svakog trade-a i svake analitičke odluke
+- Graceful shutdown: pri zaustavljanju uredno zatvori sve IB konekcije
+  i pohrani trenutno stanje
+- Recovery pri ponovnom pokretanju:
+    1. Učitaj zadnje pohranjeno stanje
+    2. Dohvati tržišne podatke za period dok je bio ugašen
+    3. Analiziraj promjene (open pozicije, P&L, tržišni uvjeti)
+    4. Nastavi normalan rad bez ručne intervencije
+- Implementiraj watchdog mehanizam za automatski restart pri crashu
+  (systemd service, PM2 ili ekvivalent)
+7. Dnevni email report
+- Svaki dan u 18:00 ET generiraj i pošalji HTML email report na IB mail adresu
+- Report mora sadržavati:
+    - Ukupna vrijednost portfolija i dnevna promjena (% i apsolutno)
+    - Lista svih trade-ova tog dana (dionica, smjer, cijena, P&L)
+    - Top 3 dobitnika i top 3 gubitnika
+    - Trenutne otvorene pozicije
+    - Polymarket sentiment sažetak
+    - Upozorenje ako je gubitak prešao 10% (warning) ili 20% (kritično)
+8. Konfiguracija i upravljanje
+Sve konfiguracijske varijable u jednoj .env datoteci:
+  IB_ACCOUNT_ID, IB_HOST, IB_PORT, ENVIRONMENT (paper/live),
+  EMAIL_ADDRESS, EMAIL_SMTP_CONFIG, MAX_PORTFOLIO_LOSS_PCT (20),
+  MAX_POSITION_SIZE_PCT (25), STOP_LOSS_PCT (5), CASH_BUFFER_PCT (10),
+  LLM_MODEL (claude-sonnet-4-6), MAX_LLM_CALLS_PER_DAY (10)
+
+CLI sučelje:
+  python agent.py start    → pokreni agenta
+  python agent.py stop     → gracefully zaustavi
+  python agent.py status   → prikaži trenutno stanje portfolija
+  python agent.py report   → generiraj report odmah
+9. Logging i monitoring
+- Detaljan logging svake odluke i svakog trade-a u log datoteku i konzolu
+- Log levels: INFO (normalan rad), WARNING (risk upozorenja), ERROR (greške)
+- Svaki LLM API poziv mora biti logiran s brojem utrošenih tokena
+- Čuvaj logove minimum 30 dana
+10. Tech stack
+- Jezik: Python 3.10+
+- IB konekcija: ib_insync (async wrapper za TWS API)
+- Baza podataka: SQLite (lokalno) / PostgreSQL (server deployment)
+- Scheduling: APScheduler
+- Email: smtplib ili sendgrid
+- LLM: Anthropic Python SDK (claude-sonnet-4-6)
+11. Optimizacija brzine i performansi
+Brzina izvođenja je kritičan prioritet. Od prvog dana razvoja, svaki modul
+mora biti pisan s performansama na umu.
+
+ASINKRONO PROGRAMIRANJE
+- Sve I/O operacije (IB API pozivi, Polymarket fetch, baza podataka, email)
+  moraju biti implementirane kao async/await — nikad blocking pozivi u
+  glavnoj event loop petlji
+- Koristi asyncio.gather() za paralelno izvršavanje neovisnih operacija
+
+NUMPY VEKTORIZACIJA
+- Sve kalkulacije tehničkih indikatora moraju koristiti NumPy vektorizirane operacije
+- Strogo zabranjeno koristiti Python for-petlje za operacije nad nizovima cijena
+- Primjer: EMA izračun mora koristiti np.convolve() ili pandas ewm(),
+  nikad iterativni Python loop
+
+CACHING INDIKATORA
+- Izračunate vrijednosti indikatora moraju biti keširane i inkrementalno
+  ažurirane pri svakoj novoj cijeni — ne računati sve od nule
+- Koristi collections.deque s fiksnom veličinom za rolling windows
+- Implementiraj dirty flag mehanizam: indikator se recalculate samo
+  kada su se promijenili ulazni podaci
+
+PROFILIRANJE I MJERENJE
+- Mjeri i logiraj vrijeme od primanja tržišnog signala do slanja naloga
+  (cilj: < 100ms)
+- Jednom tjedno automatski generiraj kratki performance report u logove
+
+MOGUĆE BUDUĆE OPTIMIZACIJE (pripremi arhitekturu za ovo)
+- Kritični dijelovi kalkulacija mogu se po potrebi prepisati kao
+  Cython ekstenzije bez promjena u ostatku koda
+- Arhitektura mora biti modularna kako bi se pojedini dijelovi
+  mogli zamijeniti bez refaktoriranja cijelog sustava
+12. Lokalni testovi
+Implementiraj kompletnu test suite koja se može pokrenuti lokalno bez
+aktivne IB konekcije. Svi testovi moraju biti zeleni prije svakog deploymenta.
+
+POKRETANJE:
+  python agent.py test           → pokreni sve testove
+  python agent.py test --unit    → samo unit testovi
+  python agent.py test --integ   → samo integracijski testovi
+  python agent.py test --perf    → samo performance testovi
+
+UNIT TESTOVI (test/test_indicators.py)
+  - test_rsi_overbought(), test_rsi_oversold()
+  - test_macd_crossover(), test_ema_crossover()
+  - test_bollinger_bands()
+  - test_stop_loss_trigger(), test_portfolio_hard_stop()
+  - test_position_size_limit(), test_cash_buffer()
+
+INTEGRACIJSKI TESTOVI (test/test_agent.py)
+  - test_buy_signal_flow(), test_sell_signal_flow()
+  - test_recovery_flow()
+  - test_market_closed_no_trades()
+  - test_email_report_generation()
+  - test_polymarket_signal_integration()
+
+PERFORMANCE TESTOVI (test/test_performance.py)
+  - test_indicator_calculation_speed(): < 10ms za 1000 svijeća
+  - test_signal_to_order_latency(): < 100ms end-to-end
+  - test_numpy_vs_loop_benchmark(): NumPy min. 10x brži od petlje
+
+BACKTESTING SMOKE TEST (test/test_backtest.py)
+  - test_strategy_not_bankrupt(): 30 dana povijesnih podataka,
+    gubitak ne smije prijeći 20%
+  - test_strategy_makes_trades(): strategija mora generirati
+    barem nekoliko signala na testnim podacima
+
+Koristi pytest. Svaki test mora biti deterministički
+(fiksirani seed, mock za external API pozive).
+13. LLM arhitektura i troškovni model novo
+Agent mora koristiti hibridnu arhitekturu u kojoj LLM API NIJE u
+kritičnom hot path-u svake trading odluke. Razlog: kod kontinuiranog
+rada, pozivanje LLM API-ja za svaki signal može premašiti vrijednost
+samog portfolija.
+
+DETERMINISTIČKI SLOJ (bez LLM-a — uvijek aktivan)
+Sav core trading logic mora biti implementiran kao čist Python/NumPy kod:
+- Izračun tehničkih indikatora (RSI, MACD, EMA, Bollinger Bands)
+- Generiranje buy/sell signala na temelju indikatora
+- Risk management (stop-loss, position sizing, cash buffer provjere)
+- Izvršavanje trade naloga prema IB API-ju
+- State persistence i crash recovery
+Ovaj sloj mora raditi potpuno autonomno, bez ijednog LLM API poziva.
+
+LLM SLOJ (samo za složene, nefrekventne zadatke)
+LLM API poziva se isključivo za:
+- Interpretacija Polymarket sentimenta i vijesti (max. 4x dnevno)
+- Generiranje dnevnog email reporta (1x dnevno)
+- Interpretacija neuobičajenih tržišnih uvjeta koji ne odgovaraju
+  poznatim patternima (iznimno, po potrebi)
+
+ODABIR MODELA
+- Za LLM pozive koristi claude-sonnet-4-6 — dovoljan za sentiment
+  analizu i report generiranje, a značajno jeftiniji od Opusa
+- Model je konfigurabilna varijabla: LLM_MODEL=claude-sonnet-4-6
+- Hard limit: MAX_LLM_CALLS_PER_DAY=10 — ako se dostigne,
+  preskoči LLM korak i logiraj upozorenje
+
+PROCIJENJENI OPERATIVNI TROŠAK
+- Cilj: maksimalno 10–30 LLM API poziva dnevno
+- Očekivani mjesečni trošak API-ja: $1–3 USD
+- Svaki LLM poziv mora biti logiran s brojem tokena radi praćenja troškova

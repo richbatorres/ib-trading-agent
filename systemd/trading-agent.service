@@ -1,0 +1,23 @@
+[Unit]
+Description=IB Trading Agent — Autonomous trading agent for Interactive Brokers
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=/opt/ib-trading-agent
+ExecStart=/opt/ib-trading-agent/venv/bin/python agent.py start
+Restart=on-failure
+RestartSec=10
+
+# Watchdog: stop restarts after 5 crashes in 10 minutes
+StartLimitBurst=5
+StartLimitIntervalSec=600
+
+StandardOutput=journal
+StandardError=journal
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

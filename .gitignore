@@ -1,0 +1,49 @@
+# Environment and secrets
+.env
+.env.local
+.env.*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+dist/
+build/
+eggs/
+*.whl
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Data and logs (runtime artifacts)
+data/
+!data/.gitkeep
+logs/
+!logs/.gitkeep
+
+# IDE
+.idea/
+*.swp
+*.swo
+*~
+.vscode/settings.json
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.hypothesis/
+
+# Distribution
+*.tar.gz
+*.zip

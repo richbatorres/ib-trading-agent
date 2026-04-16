@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "ib-trading-agent"
+version = "0.1.0"
+description = "Autonomous AI trading agent for Interactive Brokers"
+requires-python = ">=3.10"
+dependencies = [
+    "ib_insync>=0.9.86",
+    "apscheduler>=3.10.4",
+    "aiohttp>=3.9.0",
+    "python-dotenv>=1.0.0",
+    "aiosqlite>=0.19.0",
+    "anthropic>=0.39.0",
+    "numpy>=1.26.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "hypothesis>=6.92.0",
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.23.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "test"]
+asyncio_mode = "auto"
+markers = [
+    "unit: Unit tests",
+    "integration: Integration tests",
+    "performance: Performance tests",
+    "backtest: Backtesting tests",
+    "property: Property-based tests",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]

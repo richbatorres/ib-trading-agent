@@ -1,0 +1,527 @@
+"""TradingAgent: main orchestrator that wires all components together.
+
+Initializes all services with proper dependency injection, sets up the
+APScheduler for periodic tasks, wires IB event callbacks, and runs the
+ib_insync event loop as the main asyncio loop.
+
+Requirements: 1.1, 2.1, 2.3, 3.3, 3.4, 4.1, 13.1, 14.4, 18.1, 23.1, 23.2, 23.4, 24.8
+"""
+
+import asyncio
+import logging
+from datetime import datetime
+from typing import Optional
+
+import nest_asyncio
+import numpy as np
+
+# Allow nested event loops — required for ib_insync's sleep() inside asyncio.run()
+nest_asyncio.apply()
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
+
+from src.config import AgentConfig
+from src.logging_config import setup_logging
+from src.models.domain import AgentState, PortfolioSnapshot
+from src.services.connection_manager import ConnectionManager
+from src.services.market_data_service import MarketDataService
+from src.services.market_hours_service import MarketHoursService
+from src.services.order_executor import OrderExecutor
+from src.services.polymarket_service import PolymarketService
+from src.services.report_generator import ReportGenerator
+from src.services.risk_manager import RiskManager
+from src.services.shutdown_handler import ShutdownHandler
+from src.services.state_manager import StateManager
+from src.services.strategy_engine import StrategyEngine
+from src.services.watchlist_manager import WatchlistManager
+
+logger = logging.getLogger(__name__)
+
+# Default watchlist — filtered by volume > 500k in production
+_DEFAULT_WATCHLIST = [
+    "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA",
+    "META", "TSLA", "JPM", "V", "JNJ",
+]
+
+
+class TradingAgent:
+    """Main trading agent that wires all components together.
+
+    Manages the full lifecycle: initialization, startup, event loop,
+    tick processing, scheduled tasks, and shutdown.
+    """
+
+    def __init__(self, config: AgentConfig) -> None:
+        self._config = config
+        self._scheduler: Optional[AsyncIOScheduler] = None
+        self._latency_samples: list = []  # signal-to-order latency in ms
+
+        # Core services — initialized in constructor with dependency injection
+        self._connection_manager = ConnectionManager(config)
+        self._state_manager = StateManager(config)
+
+        # IB instance from connection manager
+        ib = self._connection_manager.ib
+
+        # Market services
+        self._market_hours = MarketHoursService(ib)
+        self._polymarket = PolymarketService()
+
+        # Strategy engine — uses market hours for filtering, polymarket for sentiment
+        self._strategy_engine = StrategyEngine(
+            market_hours=self._market_hours,
+            polymarket_sentiment=self._polymarket.sentiment_score,
+            earnings_blackout_symbols=set(),
+            market_data_type=config.market_data_type,
+        )
+
+        # Risk management
+        self._risk_manager = RiskManager(config, self._state_manager, ib)
+
+        # Order execution
+        self._order_executor = OrderExecutor(ib, self._risk_manager, self._state_manager)
+
+        # Watchlist manager — filters candidates by volume and earnings
+        self._watchlist_manager = WatchlistManager(ib)
+
+        # Market data — subscribes to watchlist symbols
+        self._market_data = MarketDataService(ib, _DEFAULT_WATCHLIST, market_data_type=config.market_data_type)
+
+        # Reporting
+        self._report_generator = ReportGenerator(config, self._state_manager)
+
+        # Shutdown handler
+        self._shutdown_handler = ShutdownHandler(
+            self._order_executor, self._state_manager, self._connection_manager
+        )
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    async def start(self) -> None:
+        """Execute the full startup sequence and run the event loop.
+
+        Steps:
+        a. Setup logging
+        b. Initialize StateManager (create tables)
+        c. Connect to IB via ConnectionManager
+        d. Check for crash recovery (load_last_state, reconcile_with_ib)
+        e. Update market hours schedule
+        f. Subscribe to market data
+        g. Setup APScheduler with periodic tasks
+        h. Wire IB event callbacks
+        i. Setup signal handlers via ShutdownHandler
+        j. Persist RUNNING agent state
+        k. Start the event loop (ib.run())
+        """
+        # a. Setup logging
+        setup_logging()
+        logger.info("TradingAgent starting — environment=%s", self._config.environment)
+
+        # b. Initialize StateManager
+        await self._state_manager.initialize()
+        logger.info("StateManager initialized")
+
+        # c. Connect to IB
+        await self._connection_manager.connect()
+        logger.info("Connected to IB")
+
+        # d. Crash recovery
+        last_state = await self._state_manager.load_last_state()
+        if last_state is not None:
+            logger.info(
+                "Previous agent state found: %s (crash_count=%d)",
+                last_state.state,
+                last_state.crash_count,
+            )
+            ib = self._connection_manager.ib
+            discrepancies = await self._state_manager.reconcile_with_ib(ib)
+            if discrepancies:
+                logger.warning(
+                    "State reconciliation found %d discrepancies", len(discrepancies)
+                )
+        else:
+            logger.info("No previous agent state — fresh start")
+
+        # e. Update market hours schedule
+        await self._market_hours.update_schedule()
+        logger.info("Market hours schedule updated")
+
+        # e2. Build filtered watchlist and check earnings blackout
+        watchlist = await self._watchlist_manager.build_watchlist(_DEFAULT_WATCHLIST)
+        blackout = await self._watchlist_manager.update_earnings_blackout(watchlist)
+        self._market_data._watchlist = watchlist
+        self._strategy_engine.earnings_blackout_symbols = blackout
+        logger.info(
+            "Watchlist ready: %d symbols, %d in earnings blackout",
+            len(watchlist),
+            len(blackout),
+        )
+
+        # f. Subscribe to market data and wire tick callback
+        self._market_data.set_tick_callback(self._on_tick)
+        await self._market_data.subscribe_all()
+        logger.info("Market data subscriptions active")
+
+        # g. Setup APScheduler
+        self._setup_scheduler()
+        logger.info("Scheduler configured and started")
+
+        # h. Wire IB event callbacks
+        self._wire_ib_events()
+        logger.info("IB event callbacks wired")
+
+        # i. Setup signal handlers
+        loop = asyncio.get_running_loop()
+        self._shutdown_handler.setup_signal_handlers(loop)
+        logger.info("Signal handlers registered")
+
+        # j. Persist RUNNING agent state
+        now = datetime.now()
+        agent_state = AgentState(
+            state="RUNNING",
+            initial_portfolio_value=None,
+            start_time=now,
+            last_heartbeat=now,
+            crash_count=last_state.crash_count if last_state else 0,
+        )
+        await self._state_manager.persist_agent_state(agent_state)
+        logger.info("Agent state persisted as RUNNING")
+
+        # k. Keep the agent running.
+        # ib_insync uses nest_asyncio to allow nested event loops.
+        # We use ib.sleep() directly which processes IB events and
+        # yields to the asyncio scheduler.
+        logger.info("TradingAgent fully started — entering event loop")
+        ib = self._connection_manager.ib
+        try:
+            while True:
+                ib.sleep(1)
+        except (KeyboardInterrupt, SystemExit):
+            logger.info("Agent loop interrupted")
+
+    async def stop(self) -> None:
+        """Delegate shutdown to the ShutdownHandler."""
+        logger.info("TradingAgent stop requested")
+        if self._scheduler is not None:
+            self._scheduler.shutdown(wait=False)
+            logger.info("Scheduler shut down")
+        await self._polymarket.close()
+        await self._shutdown_handler.shutdown()
+
+    # ------------------------------------------------------------------
+    # Tick processing
+    # ------------------------------------------------------------------
+
+    def _on_tick(
+        self,
+        symbol: str,
+        price: float,
+        volume: float,
+        prices: np.ndarray,
+        volumes: np.ndarray,
+        avg_volume: float,
+    ) -> None:
+        """Tick callback from MarketDataService.
+
+        Processes the tick through the signal pipeline:
+        1. StrategyEngine.process_tick() → optional TradeSignal
+        2. RiskManager.evaluate_signal() → optional ApprovedTrade
+        3. OrderExecutor.execute_trade() → submit order
+        4. Update RiskManager portfolio state
+
+        Runs the async pipeline on the current event loop.
+        """
+        # Update polymarket sentiment on the strategy engine before processing
+        self._strategy_engine.polymarket_sentiment = self._polymarket.sentiment_score
+
+        # Schedule the async tick processing on the event loop
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(
+                self._process_tick_async(symbol, price, volume, prices, volumes, avg_volume)
+            )
+        except RuntimeError:
+            logger.warning("No running event loop — tick for %s dropped", symbol)
+
+    async def _process_tick_async(
+        self,
+        symbol: str,
+        price: float,
+        volume: float,
+        prices: np.ndarray,
+        volumes: np.ndarray,
+        avg_volume: float,
+    ) -> None:
+        """Async tick processing pipeline with latency profiling."""
+        import time as _time
+
+        tick_start = _time.perf_counter()
+        try:
+            # 1. Generate signal from strategy engine
+            signal = await self._strategy_engine.process_tick(
+                symbol=symbol,
+                price=price,
+                volume=volume,
+                prices=prices,
+                volumes=volumes,
+                avg_daily_volume=avg_volume,
+            )
+
+            if signal is None:
+                return
+
+            logger.info(
+                "Signal generated: %s %s (strategy=%s, confidence=%.2f)",
+                signal.direction,
+                signal.symbol,
+                signal.strategy,
+                signal.confidence,
+            )
+
+            # 2. Evaluate signal against risk limits
+            approved = self._risk_manager.evaluate_signal(signal)
+            if approved is None:
+                return
+
+            # 3. Execute the trade
+            await self._order_executor.execute_trade(approved)
+
+            # Measure signal-to-order latency
+            latency_ms = (_time.perf_counter() - tick_start) * 1000
+            self._latency_samples.append(latency_ms)
+            if latency_ms > 100:
+                logger.warning(
+                    "Signal-to-order latency %.1fms > 100ms target for %s",
+                    latency_ms,
+                    symbol,
+                )
+            else:
+                logger.debug(
+                    "Signal-to-order latency %.1fms for %s", latency_ms, symbol
+                )
+
+            # 4. Update risk manager portfolio state
+            ib = self._connection_manager.ib
+            account_values = ib.accountValues()
+            total_value = 0.0
+            cash = 0.0
+            for av in account_values:
+                if av.tag == "NetLiquidation" and av.currency == "USD":
+                    total_value = float(av.value)
+                elif av.tag == "CashBalance" and av.currency == "USD":
+                    cash = float(av.value)
+            if total_value > 0:
+                self._risk_manager.update_portfolio(total_value, cash)
+
+        except Exception:
+            logger.exception("Error processing tick for %s", symbol)
+
+    # ------------------------------------------------------------------
+    # Scheduled tasks
+    # ------------------------------------------------------------------
+
+    def _setup_scheduler(self) -> None:
+        """Configure and start APScheduler with all periodic tasks."""
+        self._scheduler = AsyncIOScheduler()
+
+        # Polymarket updates every 15 minutes
+        self._scheduler.add_job(
+            self._polymarket.update,
+            IntervalTrigger(minutes=15),
+            id="polymarket_update",
+            name="Polymarket sentiment update",
+            replace_existing=True,
+        )
+
+        # Portfolio loss checks every 1 minute during market hours
+        self._scheduler.add_job(
+            self._check_portfolio_loss,
+            IntervalTrigger(minutes=1),
+            id="portfolio_loss_check",
+            name="Portfolio loss check",
+            replace_existing=True,
+        )
+
+        # Portfolio snapshots every 5 minutes during market hours
+        self._scheduler.add_job(
+            self._take_portfolio_snapshot,
+            IntervalTrigger(minutes=5),
+            id="portfolio_snapshot",
+            name="Portfolio snapshot",
+            replace_existing=True,
+        )
+
+        # Daily report at 18:00 ET
+        self._scheduler.add_job(
+            self._generate_daily_report,
+            CronTrigger(hour=18, minute=0, timezone="America/New_York"),
+            id="daily_report",
+            name="Daily report generation",
+            replace_existing=True,
+        )
+
+        # Weekly performance report — placeholder (logs summary every Monday at 08:00 ET)
+        self._scheduler.add_job(
+            self._generate_weekly_performance_report,
+            CronTrigger(day_of_week="mon", hour=8, minute=0, timezone="America/New_York"),
+            id="weekly_performance",
+            name="Weekly performance report",
+            replace_existing=True,
+        )
+
+        self._scheduler.start()
+
+    async def _check_portfolio_loss(self) -> None:
+        """Check portfolio loss — only during market hours."""
+        if not self._market_hours.is_market_open():
+            return
+
+        # Update portfolio values from IB before checking
+        ib = self._connection_manager.ib
+        account_values = ib.accountValues()
+        total_value = 0.0
+        cash = 0.0
+        for av in account_values:
+            if av.tag == "NetLiquidation" and av.currency == "USD":
+                total_value = float(av.value)
+            elif av.tag == "CashBalance" and av.currency == "USD":
+                cash = float(av.value)
+        if total_value > 0:
+            self._risk_manager.update_portfolio(total_value, cash)
+
+        await self._risk_manager.check_portfolio_loss()
+
+    async def _take_portfolio_snapshot(self) -> None:
+        """Take a portfolio snapshot — only during market hours."""
+        if not self._market_hours.is_market_open():
+            return
+
+        ib = self._connection_manager.ib
+        account_values = ib.accountValues()
+        total_value = 0.0
+        cash = 0.0
+        for av in account_values:
+            if av.tag == "NetLiquidation" and av.currency == "USD":
+                total_value = float(av.value)
+            elif av.tag == "CashBalance" and av.currency == "USD":
+                cash = float(av.value)
+
+        positions_value = total_value - cash
+        num_positions = len(ib.positions())
+
+        snapshot = PortfolioSnapshot(
+            total_value=total_value,
+            cash_balance=cash,
+            positions_value=positions_value,
+            daily_pnl=0.0,  # Will be computed from initial value
+            total_pnl=0.0,
+            total_pnl_pct=0.0,
+            num_open_positions=num_positions,
+            hard_stop_active=self._risk_manager.is_hard_stop_active,
+            snapshot_time=datetime.now(),
+        )
+
+        await self._state_manager.persist_portfolio_snapshot(snapshot)
+        logger.info(
+            "Portfolio snapshot: value=%.2f, cash=%.2f, positions=%d",
+            total_value,
+            cash,
+            num_positions,
+        )
+
+    async def _generate_daily_report(self) -> None:
+        """Generate and send the daily report.
+
+        Fetches the latest portfolio snapshot and today's trades,
+        then generates and sends the HTML report.
+        """
+        logger.info("Generating daily report")
+
+        try:
+            snapshot = await self._state_manager.get_latest_portfolio_snapshot()
+            if snapshot is None:
+                logger.warning("No portfolio snapshot available — skipping daily report")
+                return
+
+            trades = await self._state_manager.get_trades_for_date(datetime.now())
+
+            # Build open positions from IB
+            ib = self._connection_manager.ib
+            open_positions = []
+            for pos in ib.positions():
+                open_positions.append({
+                    "symbol": pos.contract.symbol,
+                    "quantity": int(pos.position),
+                    "avg_cost": pos.avgCost,
+                    "current_price": 0.0,  # Would need market data lookup
+                    "unrealized_pnl": 0.0,
+                })
+
+            html = await self._report_generator.generate_report(
+                portfolio=snapshot,
+                trades=trades,
+                open_positions=open_positions,
+                polymarket_sentiment=self._polymarket.sentiment_score,
+            )
+
+            await self._report_generator.send_report(html)
+            logger.info("Daily report generated and sent")
+
+        except Exception:
+            logger.exception("Failed to generate daily report")
+
+    async def _generate_weekly_performance_report(self) -> None:
+        """Generate weekly performance report with latency statistics."""
+        if not self._latency_samples:
+            logger.info("Weekly performance report — no latency data collected")
+            return
+
+        samples = self._latency_samples
+        avg_latency = sum(samples) / len(samples)
+        min_latency = min(samples)
+        max_latency = max(samples)
+        over_100ms = sum(1 for s in samples if s > 100)
+
+        logger.info(
+            "Weekly performance report — signals processed: %d, "
+            "latency avg=%.1fms min=%.1fms max=%.1fms, "
+            "over 100ms target: %d (%.1f%%)",
+            len(samples),
+            avg_latency,
+            min_latency,
+            max_latency,
+            over_100ms,
+            (over_100ms / len(samples)) * 100 if samples else 0,
+        )
+
+        # Reset samples for next week
+        self._latency_samples.clear()
+
+    # ------------------------------------------------------------------
+    # IB event wiring
+    # ------------------------------------------------------------------
+
+    def _wire_ib_events(self) -> None:
+        """Wire IB event callbacks to the appropriate service handlers.
+
+        - pendingTickersEvent → MarketDataService.on_pending_tickers
+        - execDetailsEvent → OrderExecutor._on_exec_details
+        - orderStatusEvent → OrderExecutor._on_order_status
+        - disconnectedEvent → ConnectionManager._on_disconnected
+        """
+        ib = self._connection_manager.ib
+
+        # Note: pendingTickersEvent is already wired in MarketDataService.subscribe_all()
+        # We wire the remaining events here.
+
+        ib.execDetailsEvent += self._order_executor._on_exec_details
+        ib.orderStatusEvent += self._order_executor._on_order_status
+        # disconnectedEvent is already wired in ConnectionManager.connect()
+
+        logger.info(
+            "IB events wired: execDetailsEvent → OrderExecutor, "
+            "orderStatusEvent → OrderExecutor"
+        )

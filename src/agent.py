@@ -31,6 +31,7 @@ from src.models.domain import AgentState, PortfolioSnapshot
 from src.services.connection_manager import ConnectionManager
 from src.services.market_data_service import MarketDataService
 from src.services.market_hours_service import MarketHoursService
+from src.services.market_screener import MarketScreener
 from src.services.order_executor import OrderExecutor
 from src.services.polymarket_service import PolymarketService
 from src.services.report_generator import ReportGenerator
@@ -42,8 +43,8 @@ from src.services.watchlist_manager import WatchlistManager
 
 logger = logging.getLogger(__name__)
 
-# Default watchlist — filtered by volume > 500k in production
-_DEFAULT_WATCHLIST = [
+# Fallback watchlist — used if screener fails
+_FALLBACK_WATCHLIST = [
     "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA",
     "META", "TSLA", "JPM", "V", "JNJ",
 ]
@@ -58,6 +59,7 @@ class TradingAgent:
 
     def __init__(self, config: AgentConfig) -> None:
         self._config = config
+        self._initialized = False
         self._scheduler: Optional[AsyncIOScheduler] = None
         self._latency_samples: list = []  # signal-to-order latency in ms
 
@@ -89,8 +91,11 @@ class TradingAgent:
         # Watchlist manager — filters candidates by volume and earnings
         self._watchlist_manager = WatchlistManager(ib)
 
-        # Market data — subscribes to watchlist symbols
-        self._market_data = MarketDataService(ib, _DEFAULT_WATCHLIST, market_data_type=config.market_data_type)
+        # Market screener — scans S&P 500 daily for top candidates
+        self._screener = MarketScreener(top_n=30)
+
+        # Market data — subscribes to watchlist symbols (placeholder, updated after screening)
+        self._market_data = MarketDataService(ib, _FALLBACK_WATCHLIST, market_data_type=config.market_data_type)
 
         # Reporting
         self._report_generator = ReportGenerator(config, self._state_manager)
@@ -116,10 +121,10 @@ class TradingAgent:
             logger.info("Agent loop interrupted")
 
     async def initialize(self) -> None:
-        """Execute the full startup sequence (non-blocking).
+        """Execute the full startup sequence (non-blocking, idempotent).
 
-        After calling this, use ib.run() or await asyncio.sleep() to
-        keep the agent running.
+        Safe to call multiple times — skips already-completed steps.
+        Used for initial startup and reconnection after crashes.
 
         Steps:
         a. Setup logging
@@ -134,8 +139,18 @@ class TradingAgent:
         j. Persist RUNNING agent state
         k. Start the event loop (ib.run())
         """
-        # a. Setup logging
+        # a. Setup logging (idempotent)
         setup_logging()
+
+        if self._initialized:
+            # Reconnection path: just reconnect IB and re-sync
+            logger.info("Re-initializing after disconnect...")
+            if not self._connection_manager.is_connected():
+                await self._connection_manager.connect()
+                self._connection_manager.ib.sleep(3)
+                logger.info("Reconnected to IB")
+            return
+
         logger.info("TradingAgent starting — environment=%s", self._config.environment)
 
         # b. Initialize StateManager
@@ -214,8 +229,19 @@ class TradingAgent:
             logger.warning("Could not load portfolio from IB — setting default 1M")
             self._risk_manager.update_portfolio(1_000_000.0, 1_000_000.0)
 
-        # e2. Build filtered watchlist and check earnings blackout
-        watchlist = await self._watchlist_manager.build_watchlist(_DEFAULT_WATCHLIST)
+        # e2. Run market screener to select today's candidates
+        logger.info("Running market screener...")
+        try:
+            candidates = self._screener.screen()
+            if not candidates:
+                candidates = _FALLBACK_WATCHLIST
+                logger.warning("Screener returned no candidates — using fallback")
+        except Exception as exc:
+            logger.warning("Screener failed: %s — using fallback", exc)
+            candidates = _FALLBACK_WATCHLIST
+
+        # e3. Build filtered watchlist and check earnings blackout
+        watchlist = await self._watchlist_manager.build_watchlist(candidates)
         blackout = await self._watchlist_manager.update_earnings_blackout(watchlist)
         self._market_data._watchlist = watchlist
         self._strategy_engine.earnings_blackout_symbols = blackout
@@ -255,6 +281,7 @@ class TradingAgent:
         await self._state_manager.persist_agent_state(agent_state)
         logger.info("Agent state persisted as RUNNING")
         logger.info("TradingAgent initialization complete")
+        self._initialized = True
 
     async def stop(self) -> None:
         """Delegate shutdown to the ShutdownHandler."""
@@ -290,6 +317,10 @@ class TradingAgent:
         """
         # Update polymarket sentiment on the strategy engine before processing
         self._strategy_engine.polymarket_sentiment = self._polymarket.sentiment_score
+
+        # Update current price for existing positions
+        if symbol in self._risk_manager._open_positions:
+            self._risk_manager._open_positions[symbol]["current_price"] = price
 
         # Schedule the async tick processing on the event loop
         try:
@@ -342,6 +373,15 @@ class TradingAgent:
 
             # 3. Execute the trade
             await self._order_executor.execute_trade(approved)
+
+            # 3b. Update position tracking in RiskManager
+            if signal.direction == "BUY":
+                self._risk_manager.update_position(
+                    signal.symbol, approved.quantity, signal.price,
+                    signal.price, approved.stop_loss_price,
+                )
+            elif signal.direction == "SELL":
+                self._risk_manager.remove_position(signal.symbol)
 
             # Measure signal-to-order latency
             latency_ms = (_time.perf_counter() - tick_start) * 1000
@@ -417,12 +457,21 @@ class TradingAgent:
             replace_existing=True,
         )
 
-        # Weekly performance report — placeholder (logs summary every Monday at 08:00 ET)
+        # Weekly performance report
         self._scheduler.add_job(
             self._generate_weekly_performance_report,
             CronTrigger(day_of_week="mon", hour=8, minute=0, timezone="America/New_York"),
             id="weekly_performance",
             name="Weekly performance report",
+            replace_existing=True,
+        )
+
+        # Daily market screening at 9:00 ET (30 min before market open)
+        self._scheduler.add_job(
+            self._run_daily_screening,
+            CronTrigger(hour=9, minute=0, timezone="America/New_York"),
+            id="daily_screening",
+            name="Daily market screening",
             replace_existing=True,
         )
 
@@ -486,6 +535,52 @@ class TradingAgent:
             num_positions,
         )
 
+        # Export portfolio status as JSON for the dashboard
+        self._export_portfolio_json(ib)
+
+    def _export_portfolio_json(self, ib) -> None:
+        """Write portfolio status to logs/portfolio.json for the dashboard."""
+        import json as _json
+
+        try:
+            positions = []
+            for item in ib.portfolio():
+                positions.append({
+                    "symbol": item.contract.symbol,
+                    "quantity": int(item.position),
+                    "avgCost": round(item.averageCost, 2),
+                    "marketPrice": round(item.marketPrice, 2),
+                    "marketValue": round(item.marketValue, 0),
+                    "unrealizedPnL": round(item.unrealizedPNL, 2),
+                    "realizedPnL": round(item.realizedPNL, 2),
+                    "type": "LONG" if item.position > 0 else "SHORT",
+                })
+
+            account = {}
+            for av in ib.accountValues():
+                if av.currency == "BASE" and av.tag in (
+                    "NetLiquidation", "TotalCashBalance",
+                    "UnrealizedPnL", "RealizedPnL", "GrossPositionValue",
+                ):
+                    account[av.tag] = float(av.value)
+
+            fills_today = len(ib.fills())
+
+            data = {
+                "timestamp": datetime.now().isoformat(),
+                "account": account,
+                "positions": positions,
+                "fillsToday": fills_today,
+                "hardStopActive": self._risk_manager.is_hard_stop_active,
+                "openPositionCount": len(positions),
+            }
+
+            with open("logs/portfolio.json", "w") as f:
+                _json.dump(data, f, indent=2)
+
+        except Exception as exc:
+            logger.debug("Failed to export portfolio JSON: %s", exc)
+
     async def _generate_daily_report(self) -> None:
         """Generate and send the daily report.
 
@@ -526,6 +621,24 @@ class TradingAgent:
 
         except Exception:
             logger.exception("Failed to generate daily report")
+
+    async def _run_daily_screening(self) -> None:
+        """Run market screener and update the watchlist for today.
+
+        Called daily at 9:00 ET (30 min before market open).
+        Scans S&P 500, selects top candidates, updates MarketDataService.
+        """
+        logger.info("Running daily market screening...")
+        try:
+            candidates = self._screener.screen()
+            if candidates:
+                self._market_data._watchlist = candidates
+                logger.info("Watchlist updated: %d candidates for today", len(candidates))
+                logger.info("Top 5: %s", candidates[:5])
+            else:
+                logger.warning("Screening returned no candidates — keeping current watchlist")
+        except Exception:
+            logger.exception("Daily screening failed — keeping current watchlist")
 
     async def _generate_weekly_performance_report(self) -> None:
         """Generate weekly performance report with latency statistics."""

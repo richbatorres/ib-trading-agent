@@ -55,46 +55,112 @@ def _remove_pid_file() -> None:
 
 
 async def _run_agent_loop(config: AgentConfig) -> None:
-    """Main agent event loop — creates and starts the TradingAgent.
+    """Main agent event loop — resilient to IB Gateway crashes and network outages.
 
-    Runs the startup sequence as async, then enters a blocking loop
-    that processes both IB events and asyncio tasks.
+    The agent NEVER exits on its own. If IB disconnects, it keeps running,
+    collects Yahoo data if available, and reconnects when Gateway is back.
+    Only KeyboardInterrupt or SIGTERM can stop it.
     """
-    from ib_insync import util as ib_util
+    import time as _time
     from src.agent import TradingAgent
 
     agent = TradingAgent(config)
     logger.info("Agent started — PID %d, environment=%s", os.getpid(), config.environment)
 
+    yahoo = None
+    mdt = config.market_data_type
+
     try:
-        await agent.initialize()
-        logger.info("Agent entering main loop")
-        ib = agent._connection_manager.ib
-        mdt = config.market_data_type
+        # Outer loop: survives any crash, reconnects forever
+        while True:
+            try:
+                # Initialize / reconnect
+                if not agent._connection_manager.is_connected():
+                    logger.info("Connecting to IB Gateway...")
+                    try:
+                        await agent.initialize()
+                        logger.info("Agent initialized and connected to IB")
+                    except Exception as exc:
+                        logger.warning("IB connection failed: %s — will retry in 30s", exc)
+                        # Even without IB, keep collecting Yahoo data
+                        if yahoo:
+                            try:
+                                yahoo.load_history()
+                                yahoo.poll()
+                            except Exception:
+                                pass
+                        _time.sleep(30)
+                        continue
 
-        if mdt == "yahoo":
-            # Use Yahoo Finance for market data (free, no IB subscription needed)
-            from src.services.yahoo_data_provider import YahooDataProvider
-            yahoo = YahooDataProvider(agent._market_data._watchlist)
-            yahoo.set_tick_callback(agent._on_tick)
-            logger.info("Loading historical data from Yahoo Finance...")
-            loaded = yahoo.load_history()
-            logger.info("Yahoo: loaded history for %d symbols", loaded)
+                # Setup Yahoo provider after screening (watchlist is now populated)
+                if mdt == "yahoo" and yahoo is None:
+                    from src.services.yahoo_data_provider import YahooDataProvider
+                    watchlist = agent._market_data._watchlist
+                    yahoo = YahooDataProvider(watchlist)
+                    yahoo.set_tick_callback(agent._on_tick)
+                    logger.info("Yahoo provider created for %d symbols", len(watchlist))
 
-            while ib.isConnected():
-                yahoo.poll()
-                ib.sleep(10)  # poll every 10 seconds
-        else:
-            # IB market data mode
-            mdt_int = int(mdt) if mdt.isdigit() else 4
-            while ib.isConnected():
-                if mdt_int in (3, 4):
-                    agent._market_data.poll_snapshots()
-                ib.sleep(5)
+                # Load Yahoo history on first successful connection
+                if yahoo:
+                    try:
+                        logger.info("Loading Yahoo Finance history...")
+                        yahoo.load_history()
+                        logger.info("Yahoo history loaded")
+                    except Exception as exc:
+                        logger.warning("Yahoo history load failed: %s", exc)
+
+                # Inner loop: runs while IB is connected
+                logger.info("Agent entering main loop (IB connected)")
+                ib = agent._connection_manager.ib
+
+                while True:
+                    try:
+                        if yahoo:
+                            yahoo.poll()
+
+                        if ib.isConnected():
+                            ib.sleep(10)
+                        else:
+                            # IB disconnected — keep polling Yahoo, wait for reconnect
+                            logger.warning("IB disconnected — collecting Yahoo data, waiting for Gateway...")
+                            if yahoo:
+                                yahoo.poll()
+                            _time.sleep(10)
+
+                            # Try to reconnect
+                            try:
+                                await agent._connection_manager.connect()
+                                ib.sleep(2)  # sync account data
+                                # Re-initialize portfolio
+                                account_values = ib.accountValues()
+                                for av in account_values:
+                                    if av.tag == "NetLiquidation" and av.currency == "BASE":
+                                        agent._risk_manager.update_portfolio(float(av.value), float(av.value))
+                                        logger.info("Portfolio re-initialized after reconnect: %.2f", float(av.value))
+                                        break
+                                logger.info("IB Gateway reconnected!")
+                            except Exception as exc:
+                                logger.debug("Reconnect attempt failed: %s", exc)
+
+                    except (KeyboardInterrupt, SystemExit):
+                        raise
+                    except Exception as exc:
+                        logger.error("Error in main loop: %s — continuing", exc)
+                        _time.sleep(5)
+
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except Exception as exc:
+                logger.error("Agent crashed: %s — restarting in 10s", exc)
+                _time.sleep(10)
+
     except (KeyboardInterrupt, SystemExit):
-        logger.info("Agent interrupted")
+        logger.info("Agent interrupted by user")
     finally:
-        await agent.stop()
+        try:
+            await agent.stop()
+        except Exception:
+            pass
         _remove_pid_file()
 
 

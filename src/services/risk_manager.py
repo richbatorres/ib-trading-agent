@@ -23,6 +23,11 @@ logger = logging.getLogger(__name__)
 class RiskManager:
     """Enforces portfolio risk limits and manages stop-loss orders."""
 
+    # Maximum total portfolio exposure (no margin usage)
+    _MAX_TOTAL_EXPOSURE_PCT = 90.0
+    # Minimum seconds between trades on the same symbol
+    _TRADE_COOLDOWN_SECONDS = 60
+
     def __init__(
         self,
         config: AgentConfig,
@@ -42,6 +47,9 @@ class RiskManager:
         # Per-position tracking: symbol -> {quantity, entry_price, current_price, stop_loss_price}
         self._open_positions: Dict[str, dict] = {}
 
+        # Trade cooldown: symbol -> last trade timestamp
+        self._last_trade_time: Dict[str, float] = {}
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -49,82 +57,123 @@ class RiskManager:
     def evaluate_signal(self, signal: TradeSignal) -> Optional[ApprovedTrade]:
         """Validate a trade signal against risk limits in strict order.
 
-        Risk checks (order is non-negotiable per Requirement 12.4):
-        1. Hard stop check — reject if hard stop is active
-        2. Cash buffer check — reject if trade would reduce cash below buffer
-        3. Position size check — reject if position exceeds max size
-        4. Stop-loss readiness — calculate stop-loss price
-
-        Returns an ApprovedTrade if all checks pass, or None with a
-        WARNING log explaining the rejection.
+        Risk checks:
+        1. Hard stop — reject if active
+        2. Cooldown — reject if traded this symbol recently
+        3. Existing position — reject BUY if already holding, reject SELL if not holding
+        4. No short selling — SELL only closes existing long positions
+        5. Total exposure — reject if total positions > 90% of portfolio
+        6. Cash buffer — reject if cash would drop below 10%
+        7. Position size — reject if single position > 25% of portfolio
+        8. Stop-loss readiness
         """
-        # 1. Hard stop check
+        import time as _time
+
+        # 1. Hard stop
         if self._hard_stop_active:
-            logger.warning(
-                "Trade REJECTED for %s: hard stop is active — all trading halted",
+            logger.warning("Trade REJECTED for %s: hard stop active", signal.symbol)
+            return None
+
+        # 2. Cooldown check
+        last_trade = self._last_trade_time.get(signal.symbol, 0)
+        if _time.time() - last_trade < self._TRADE_COOLDOWN_SECONDS:
+            logger.info(
+                "Trade REJECTED for %s: cooldown active (%.0fs remaining)",
                 signal.symbol,
+                self._TRADE_COOLDOWN_SECONDS - (_time.time() - last_trade),
             )
             return None
+
+        # 3. Existing position check
+        existing = self._open_positions.get(signal.symbol)
+
+        if signal.direction == "BUY":
+            # Reject BUY if we already hold this symbol
+            if existing and existing.get("quantity", 0) > 0:
+                logger.info(
+                    "Trade REJECTED for %s: already holding %d shares",
+                    signal.symbol,
+                    existing["quantity"],
+                )
+                return None
+        elif signal.direction == "SELL":
+            # SELL only closes existing long positions — no short selling
+            if not existing or existing.get("quantity", 0) <= 0:
+                logger.info(
+                    "Trade REJECTED for %s: no long position to sell (no short selling)",
+                    signal.symbol,
+                )
+                return None
+            # Close the existing position
+            quantity = existing["quantity"]
+            stop_loss_price = 0.0  # no stop-loss needed for closing
+            self._last_trade_time[signal.symbol] = _time.time()
+            logger.info(
+                "Trade APPROVED for %s: SELL (close) %d shares @ %.2f",
+                signal.symbol, quantity, signal.price,
+            )
+            return ApprovedTrade(
+                signal=signal,
+                quantity=quantity,
+                stop_loss_price=stop_loss_price,
+                max_position_value=quantity * signal.price,
+            )
+
+        # --- BUY path continues ---
 
         # Calculate proposed quantity
         quantity = self.calculate_position_size(signal.price)
         if quantity <= 0:
             logger.warning(
-                "Trade REJECTED for %s: calculated position size is 0 "
-                "(price=%.2f, portfolio=%.2f, cash=%.2f)",
-                signal.symbol,
-                signal.price,
-                self._current_portfolio_value,
-                self._current_cash,
+                "Trade REJECTED for %s: position size is 0 (price=%.2f, portfolio=%.2f, cash=%.2f)",
+                signal.symbol, signal.price, self._current_portfolio_value, self._current_cash,
             )
             return None
 
         proposed_value = quantity * signal.price
 
-        # 2. Cash buffer check
+        # 5. Total exposure check — no margin
+        total_positions_value = sum(
+            abs(p.get("quantity", 0) * p.get("current_price", p.get("entry_price", 0)))
+            for p in self._open_positions.values()
+        )
+        max_total_exposure = (self._MAX_TOTAL_EXPOSURE_PCT / 100.0) * self._current_portfolio_value
+        if total_positions_value + proposed_value > max_total_exposure:
+            logger.warning(
+                "Trade REJECTED for %s: total exposure %.2f + %.2f > max %.2f (%.0f%% of portfolio)",
+                signal.symbol, total_positions_value, proposed_value,
+                max_total_exposure, self._MAX_TOTAL_EXPOSURE_PCT,
+            )
+            return None
+
+        # 6. Cash buffer check
         cash_buffer = (self._config.cash_buffer_pct / 100.0) * self._current_portfolio_value
         remaining_cash = self._current_cash - proposed_value
         if remaining_cash < cash_buffer:
             logger.warning(
-                "Trade REJECTED for %s: cash buffer violation — "
-                "remaining cash %.2f < required buffer %.2f "
-                "(%.1f%% of portfolio %.2f), proposed value=%.2f",
-                signal.symbol,
-                remaining_cash,
-                cash_buffer,
-                self._config.cash_buffer_pct,
-                self._current_portfolio_value,
-                proposed_value,
+                "Trade REJECTED for %s: cash buffer violation (remaining %.2f < buffer %.2f)",
+                signal.symbol, remaining_cash, cash_buffer,
             )
             return None
 
-        # 3. Position size check
+        # 7. Position size check
         max_position_value = (self._config.max_position_size_pct / 100.0) * self._current_portfolio_value
         if proposed_value > max_position_value:
             logger.warning(
-                "Trade REJECTED for %s: position size violation — "
-                "proposed value %.2f > max allowed %.2f "
-                "(%.1f%% of portfolio %.2f)",
-                signal.symbol,
-                proposed_value,
-                max_position_value,
-                self._config.max_position_size_pct,
-                self._current_portfolio_value,
+                "Trade REJECTED for %s: position size %.2f > max %.2f",
+                signal.symbol, proposed_value, max_position_value,
             )
             return None
 
-        # 4. Stop-loss readiness — calculate stop-loss price
+        # 8. Stop-loss readiness
         stop_loss_price = signal.price * (1.0 - self._config.stop_loss_pct / 100.0)
 
+        # Record cooldown
+        self._last_trade_time[signal.symbol] = _time.time()
+
         logger.info(
-            "Trade APPROVED for %s: %s %d shares @ %.2f, "
-            "stop-loss=%.2f, value=%.2f",
-            signal.symbol,
-            signal.direction,
-            quantity,
-            signal.price,
-            stop_loss_price,
-            proposed_value,
+            "Trade APPROVED for %s: BUY %d shares @ %.2f, stop=%.2f, value=%.2f",
+            signal.symbol, quantity, signal.price, stop_loss_price, proposed_value,
         )
 
         return ApprovedTrade(

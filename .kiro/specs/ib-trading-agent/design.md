@@ -15,6 +15,10 @@ The system is built on Python's `asyncio` event loop. The `ib_insync` library pr
 5. **SQLite with WAL mode** — Default persistence uses SQLite in WAL (Write-Ahead Logging) mode for concurrent reads during writes. PostgreSQL is supported via the same repository interface for server deployments.
 6. **LLM Hybrid Architecture** — The LLM API (Anthropic claude-sonnet-4-6) is NOT in the critical hot path of trading decisions. All core trading logic (indicators, signals, risk management, order execution) runs as pure Python/NumPy in the Deterministic Layer. The LLM is invoked only for infrequent tasks: Polymarket sentiment interpretation (max 4x/day), daily report generation (1x/day), and unusual market condition analysis (as needed). A hard daily limit (MAX_LLM_CALLS_PER_DAY=10) caps API costs to ~$1-3/month.
 7. **NumPy vectorized indicators** — All technical indicator calculations use NumPy vectorized operations. Python for-loops on price arrays are strictly forbidden. Indicator values are cached with a dirty flag mechanism for incremental updates, using `collections.deque` for rolling windows.
+8. **Market Screener** — Daily S&P 500 scanning selects top 30 candidates by volume, volatility, and momentum. Runs at 9:00 ET (30 min before market open). Uses Yahoo Finance for free data. Fallback to top 50 by market cap if Wikipedia is blocked.
+9. **Yahoo Finance data provider** — Free alternative to IB market data subscriptions for paper trading. Polls 1-minute bars every 10 seconds. Configurable via `MARKET_DATA_TYPE=yahoo` in `.env`.
+10. **Crash-resilient main loop** — Agent never exits on its own. Survives IB Gateway crashes, internet outages, and any exception. Reconnects automatically. Only SIGTERM/KeyboardInterrupt can stop it.
+11. **RiskManager v2 safety checks** — No short selling, no duplicate positions per symbol, max 90% total portfolio exposure (no margin), 60-second cooldown between trades on same symbol, position tracking after every trade.
 
 ## Architecture
 

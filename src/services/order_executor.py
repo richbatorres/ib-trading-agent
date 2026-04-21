@@ -80,48 +80,63 @@ class OrderExecutor:
     def _handle_fill(self, ib_trade: Trade, approved: ApprovedTrade) -> None:
         """Handle a trade fill: place stop-loss and persist the record.
 
+        For BUY fills: place stop-loss and persist a new OPEN trade record.
+        For SELL fills: close the matching OPEN trade with realized P&L.
         Called when the filledEvent fires on the ib_insync Trade object.
         """
         symbol = approved.signal.symbol
         fill_price = ib_trade.orderStatus.avgFillPrice
         quantity = approved.quantity
+        direction = approved.signal.direction
 
         logger.info(
             "Order filled for %s: %s %d shares @ %.2f",
-            symbol,
-            approved.signal.direction,
-            quantity,
-            fill_price,
+            symbol, direction, quantity, fill_price,
         )
 
-        # Place stop-loss immediately on fill
-        self._risk_manager.place_stop_loss(symbol, fill_price, quantity)
+        if direction == "BUY":
+            # Place stop-loss immediately on fill
+            self._risk_manager.place_stop_loss(symbol, fill_price, quantity)
 
-        # Persist trade record
-        record = TradeRecord(
-            symbol=symbol,
-            direction=approved.signal.direction,
-            entry_price=fill_price,
-            quantity=quantity,
-            stop_loss_price=approved.stop_loss_price,
-            strategy=approved.signal.strategy,
-            signal_confidence=approved.signal.confidence,
-            polymarket_sentiment=approved.signal.polymarket_sentiment,
-            entry_time=datetime.now(),
-            status="OPEN",
-        )
-
-        # Schedule the async persist on the event loop
-        import asyncio
-
-        try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(self._state_manager.persist_trade(record))
-        except RuntimeError:
-            logger.warning(
-                "No running event loop — trade record for %s not persisted",
-                symbol,
+            # Persist new OPEN trade record
+            record = TradeRecord(
+                symbol=symbol,
+                direction=direction,
+                entry_price=fill_price,
+                quantity=quantity,
+                stop_loss_price=approved.stop_loss_price,
+                strategy=approved.signal.strategy,
+                signal_confidence=approved.signal.confidence,
+                polymarket_sentiment=approved.signal.polymarket_sentiment,
+                entry_time=datetime.now(),
+                status="OPEN",
             )
+
+            import asyncio
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._state_manager.persist_trade(record))
+            except RuntimeError:
+                logger.warning(
+                    "No running event loop — trade record for %s not persisted",
+                    symbol,
+                )
+
+        elif direction == "SELL":
+            # Close the matching OPEN trade with realized P&L
+            import asyncio
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(
+                    self._state_manager.close_trade(
+                        symbol, fill_price, datetime.now()
+                    )
+                )
+            except RuntimeError:
+                logger.warning(
+                    "No running event loop — trade close for %s not persisted",
+                    symbol,
+                )
 
     def _on_exec_details(self, trade: Trade, fill: Fill) -> None:
         """Callback for IB.execDetailsEvent.

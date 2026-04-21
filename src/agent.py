@@ -10,7 +10,7 @@ Requirements: 1.1, 2.1, 2.3, 3.3, 3.4, 4.1, 13.1, 14.4, 18.1, 23.1, 23.2, 23.4, 
 import asyncio
 import logging
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Tuple
 
 import nest_asyncio
 import numpy as np
@@ -105,6 +105,9 @@ class TradingAgent:
             self._order_executor, self._state_manager, self._connection_manager
         )
 
+    # Minimum signal confidence to execute a trade
+    _MIN_CONFIDENCE = 0.65
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -185,41 +188,8 @@ class TradingAgent:
         logger.info("Market hours schedule updated")
 
         # e1. Initialize portfolio from IB account values
-        ib = self._connection_manager.ib
-        account_values = ib.accountValues()
-        logger.info("IB account values count: %d", len(account_values))
-        # Log all available tags for debugging
-        seen_tags = set()
-        for av in account_values:
-            if av.tag not in seen_tags:
-                seen_tags.add(av.tag)
-        if seen_tags:
-            logger.info("Available account tags: %s", sorted(seen_tags)[:20])
-
-        total_value = 0.0
-        cash = 0.0
-        for av in account_values:
-            if av.tag == "NetLiquidation" and av.currency == "BASE":
-                total_value = float(av.value)
-            elif av.tag == "TotalCashBalance" and av.currency == "BASE":
-                cash = float(av.value)
-        # Fallback: if BASE currency not found, try USD
-        if total_value == 0:
-            for av in account_values:
-                if av.tag == "NetLiquidation" and av.currency == "USD":
-                    total_value = float(av.value)
-                elif av.tag == "CashBalance" and av.currency == "USD":
-                    cash = float(av.value)
-        # Fallback: use any NetLiquidation value
-        if total_value == 0:
-            for av in account_values:
-                if av.tag == "NetLiquidation":
-                    total_value = float(av.value)
-                    logger.info("Found NetLiquidation: %s %s", av.value, av.currency)
-                    break
+        total_value, cash = self._read_portfolio_from_ib()
         if total_value > 0:
-            if cash == 0:
-                cash = total_value  # assume all cash if no positions
             self._risk_manager.update_portfolio(total_value, cash)
             logger.info(
                 "Portfolio initialized from IB: value=%.2f, cash=%.2f",
@@ -293,6 +263,58 @@ class TradingAgent:
         await self._shutdown_handler.shutdown()
 
     # ------------------------------------------------------------------
+    # IB account helpers
+    # ------------------------------------------------------------------
+
+    def _read_portfolio_from_ib(self) -> Tuple[float, float]:
+        """Read portfolio total value and cash from IB account values.
+
+        Uses a multi-fallback chain to handle different IB account
+        currency reporting (BASE → USD → any):
+        1. Try ``currency == "BASE"`` first (paper accounts)
+        2. Fallback to ``currency == "USD"``
+        3. Fallback to any available currency
+
+        Returns ``(total_value, cash)``. Both are 0.0 if unavailable.
+        """
+        ib = self._connection_manager.ib
+        account_values = ib.accountValues()
+
+        total_value = 0.0
+        cash = 0.0
+
+        # Pass 1: prefer BASE currency
+        for av in account_values:
+            if av.tag == "NetLiquidation" and av.currency == "BASE":
+                total_value = float(av.value)
+            elif av.tag == "TotalCashBalance" and av.currency == "BASE":
+                cash = float(av.value)
+
+        # Pass 2: fallback to USD
+        if total_value == 0:
+            for av in account_values:
+                if av.tag == "NetLiquidation" and av.currency == "USD":
+                    total_value = float(av.value)
+                elif av.tag == "CashBalance" and av.currency == "USD":
+                    cash = float(av.value)
+
+        # Pass 3: fallback to any currency
+        if total_value == 0:
+            for av in account_values:
+                if av.tag == "NetLiquidation":
+                    try:
+                        total_value = float(av.value)
+                    except (ValueError, TypeError):
+                        continue
+                    break
+
+        # If we found total_value but no cash, assume all cash
+        if total_value > 0 and cash == 0:
+            cash = total_value
+
+        return total_value, cash
+
+    # ------------------------------------------------------------------
     # Tick processing
     # ------------------------------------------------------------------
 
@@ -358,6 +380,24 @@ class TradingAgent:
             if signal is None:
                 return
 
+            # 1b. Minimum confidence filter
+            if signal.confidence < self._MIN_CONFIDENCE:
+                logger.debug(
+                    "Signal dropped for %s: confidence %.2f < minimum %.2f",
+                    signal.symbol, signal.confidence, self._MIN_CONFIDENCE,
+                )
+                return
+
+            # 1c. Position-aware SELL filter — skip SELL if not holding
+            if signal.direction == "SELL":
+                pos = self._risk_manager._open_positions.get(signal.symbol)
+                if not pos or pos.get("quantity", 0) <= 0:
+                    logger.debug(
+                        "SELL signal dropped for %s: no open position",
+                        signal.symbol,
+                    )
+                    return
+
             logger.info(
                 "Signal generated: %s %s (strategy=%s, confidence=%.2f)",
                 signal.direction,
@@ -398,15 +438,7 @@ class TradingAgent:
                 )
 
             # 4. Update risk manager portfolio state
-            ib = self._connection_manager.ib
-            account_values = ib.accountValues()
-            total_value = 0.0
-            cash = 0.0
-            for av in account_values:
-                if av.tag == "NetLiquidation" and av.currency == "USD":
-                    total_value = float(av.value)
-                elif av.tag == "CashBalance" and av.currency == "USD":
-                    cash = float(av.value)
+            total_value, cash = self._read_portfolio_from_ib()
             if total_value > 0:
                 self._risk_manager.update_portfolio(total_value, cash)
 
@@ -483,15 +515,7 @@ class TradingAgent:
             return
 
         # Update portfolio values from IB before checking
-        ib = self._connection_manager.ib
-        account_values = ib.accountValues()
-        total_value = 0.0
-        cash = 0.0
-        for av in account_values:
-            if av.tag == "NetLiquidation" and av.currency == "USD":
-                total_value = float(av.value)
-            elif av.tag == "CashBalance" and av.currency == "USD":
-                cash = float(av.value)
+        total_value, cash = self._read_portfolio_from_ib()
         if total_value > 0:
             self._risk_manager.update_portfolio(total_value, cash)
 
@@ -502,26 +526,33 @@ class TradingAgent:
         if not self._market_hours.is_market_open():
             return
 
-        ib = self._connection_manager.ib
-        account_values = ib.accountValues()
-        total_value = 0.0
-        cash = 0.0
-        for av in account_values:
-            if av.tag == "NetLiquidation" and av.currency == "USD":
-                total_value = float(av.value)
-            elif av.tag == "CashBalance" and av.currency == "USD":
-                cash = float(av.value)
+        total_value, cash = self._read_portfolio_from_ib()
+        if total_value <= 0:
+            logger.debug("Portfolio snapshot skipped — could not read IB values")
+            return
 
+        ib = self._connection_manager.ib
         positions_value = total_value - cash
         num_positions = len(ib.positions())
+
+        # Compute P&L from initial portfolio value
+        initial = self._risk_manager._initial_portfolio_value
+        total_pnl = 0.0
+        total_pnl_pct = 0.0
+        if initial and initial > 0:
+            total_pnl = total_value - initial
+            total_pnl_pct = (total_pnl / initial) * 100.0
+
+        # Update risk manager with fresh values
+        self._risk_manager.update_portfolio(total_value, cash)
 
         snapshot = PortfolioSnapshot(
             total_value=total_value,
             cash_balance=cash,
             positions_value=positions_value,
-            daily_pnl=0.0,  # Will be computed from initial value
-            total_pnl=0.0,
-            total_pnl_pct=0.0,
+            daily_pnl=total_pnl,  # Approximation: total P&L since start
+            total_pnl=total_pnl,
+            total_pnl_pct=total_pnl_pct,
             num_open_positions=num_positions,
             hard_stop_active=self._risk_manager.is_hard_stop_active,
             snapshot_time=datetime.now(),
@@ -529,10 +560,8 @@ class TradingAgent:
 
         await self._state_manager.persist_portfolio_snapshot(snapshot)
         logger.info(
-            "Portfolio snapshot: value=%.2f, cash=%.2f, positions=%d",
-            total_value,
-            cash,
-            num_positions,
+            "Portfolio snapshot: value=%.2f, cash=%.2f, positions=%d, pnl=%.2f (%.2f%%)",
+            total_value, cash, num_positions, total_pnl, total_pnl_pct,
         )
 
         # Export portfolio status as JSON for the dashboard

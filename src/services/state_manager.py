@@ -519,6 +519,49 @@ class StateManager:
             )
         return trades
 
+    async def close_trade(
+        self,
+        symbol: str,
+        exit_price: float,
+        exit_time: datetime,
+    ) -> Optional[float]:
+        """Close the oldest OPEN trade for a symbol and compute realized P&L.
+
+        Finds the oldest OPEN BUY trade for the given symbol, computes
+        ``realized_pnl = (exit_price - entry_price) * quantity``, and
+        updates the record with exit details.
+
+        Returns the realized P&L, or None if no matching trade was found.
+        """
+        if self._db is None:
+            raise RuntimeError("StateManager not initialized")
+
+        cursor = await self._db.execute(
+            "SELECT id, entry_price, quantity FROM trades "
+            "WHERE symbol = ? AND status = 'OPEN' AND direction = 'BUY' "
+            "ORDER BY id ASC LIMIT 1",
+            (symbol,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            logger.warning("close_trade: no OPEN BUY trade found for %s", symbol)
+            return None
+
+        trade_id, entry_price, quantity = row
+        realized_pnl = (exit_price - entry_price) * quantity
+
+        await self._db.execute(
+            "UPDATE trades SET status = 'CLOSED', exit_price = ?, "
+            "exit_time = ?, realized_pnl = ? WHERE id = ?",
+            (exit_price, exit_time.isoformat(), realized_pnl, trade_id),
+        )
+        await self._db.commit()
+        logger.info(
+            "Trade closed: %s %d shares, entry=%.2f exit=%.2f, P&L=%.2f",
+            symbol, quantity, entry_price, exit_price, realized_pnl,
+        )
+        return realized_pnl
+
     async def persist_llm_call(
         self,
         purpose: str,

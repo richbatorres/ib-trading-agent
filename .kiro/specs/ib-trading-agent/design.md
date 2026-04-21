@@ -1047,3 +1047,31 @@ tests/
     ├── test_performance.py      # test_indicator_calculation_speed, test_signal_to_order_latency, etc.
     └── test_backtest.py         # test_strategy_not_bankrupt, test_strategy_makes_trades
 ```
+
+## Performance Boost Changes (April 2025)
+
+### Bug Fixes Applied
+
+1. **Portfolio value reading (B1):** Extracted `_read_portfolio_from_ib()` helper with multi-fallback chain (BASE → USD → any currency). Used consistently in `initialize()`, `_check_portfolio_loss()`, `_take_portfolio_snapshot()`, and `_process_tick_async()`.
+
+2. **Trade closing with P&L (B2):** Added `StateManager.close_trade()` method. `OrderExecutor._handle_fill()` now differentiates BUY (create OPEN record + stop-loss) from SELL (close matching OPEN record with realized P&L).
+
+3. **Position-aware SELL filter (B3):** `_process_tick_async()` now checks `risk_manager._open_positions` before forwarding SELL signals, eliminating 18% of wasted rejections.
+
+4. **Log spam reduction (B4):** `YahooDataProvider.poll()` logs at DEBUG when no new data, INFO only on actual updates.
+
+5. **Snapshot P&L (O3):** `_take_portfolio_snapshot()` now computes `total_pnl` and `total_pnl_pct` from `RiskManager._initial_portfolio_value`.
+
+### Strategy Changes
+
+1. **Minimum confidence threshold:** 0.65 global minimum in `TradingAgent._MIN_CONFIDENCE`. Signals below this are dropped before risk evaluation.
+
+2. **Momentum strategy relaxed:**
+   - BUY: RSI < 35 (was: RSI crosses above 30 from below) AND MACD histogram turns positive
+   - SELL: RSI > 65 (was: RSI crosses below 70 from above) AND MACD histogram turns negative
+   - Base confidence: 0.75 (was: 0.70)
+
+3. **Mean reversion tightened:**
+   - BUY: Price < lower BB AND RSI < 40 (new RSI confirmation)
+   - SELL: Price > upper BB AND RSI > 60 (new RSI confirmation)
+   - Base confidence: 0.65 (was: 0.60)

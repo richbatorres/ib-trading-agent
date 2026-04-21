@@ -53,8 +53,8 @@ class StrategyEngine:
 
     # Base confidence values per strategy
     _BASE_CONFIDENCE = {
-        "momentum": 0.7,
-        "mean_reversion": 0.6,
+        "momentum": 0.75,
+        "mean_reversion": 0.65,
         "trend_following": 0.65,
     }
 
@@ -171,7 +171,7 @@ class StrategyEngine:
                 {"rsi": rsi, "macd_histogram": macd_hist},
             ))
 
-        mean_rev = self._evaluate_mean_reversion(price, bb_upper, bb_lower, prev)
+        mean_rev = self._evaluate_mean_reversion(price, bb_upper, bb_lower, rsi, prev)
         if mean_rev is not None:
             direction, confidence = mean_rev
             raw_signals.append((
@@ -306,23 +306,22 @@ class StrategyEngine:
     ) -> Optional[Tuple[str, float]]:
         """Momentum strategy.
 
-        BUY:  RSI crosses above 30 from below AND MACD histogram > 0.
-        SELL: RSI crosses below 70 from above AND MACD histogram < 0.
+        BUY:  RSI < 35 AND MACD histogram turns positive (from ≤ 0).
+        SELL: RSI > 65 AND MACD histogram turns negative (from ≥ 0).
 
         Returns ``(direction, confidence)`` or ``None``.
         """
-        prev_rsi = prev.get("rsi")
         prev_macd_hist = prev.get("macd_histogram")
 
-        if prev_rsi is None or prev_macd_hist is None:
+        if prev_macd_hist is None:
             return None
 
-        # BUY: RSI crosses above 30 from below AND MACD histogram turns positive
-        if prev_rsi <= 30 and rsi > 30 and prev_macd_hist <= 0 and macd_hist > 0:
+        # BUY: RSI in oversold zone AND MACD histogram turns positive
+        if rsi < 35 and prev_macd_hist <= 0 and macd_hist > 0:
             return ("BUY", self._BASE_CONFIDENCE["momentum"])
 
-        # SELL: RSI crosses below 70 from above AND MACD histogram turns negative
-        if prev_rsi >= 70 and rsi < 70 and prev_macd_hist >= 0 and macd_hist < 0:
+        # SELL: RSI in overbought zone AND MACD histogram turns negative
+        if rsi > 65 and prev_macd_hist >= 0 and macd_hist < 0:
             return ("SELL", self._BASE_CONFIDENCE["momentum"])
 
         return None
@@ -332,12 +331,15 @@ class StrategyEngine:
         price: float,
         bb_upper: float,
         bb_lower: float,
+        rsi: float,
         prev: Dict[str, Any],
     ) -> Optional[Tuple[str, float]]:
         """Mean reversion strategy.
 
-        BUY:  Price crosses below lower Bollinger Band.
-        SELL: Price crosses above upper Bollinger Band.
+        BUY:  Price crosses below lower Bollinger Band AND RSI < 40.
+        SELL: Price crosses above upper Bollinger Band AND RSI > 60.
+
+        RSI confirmation reduces noise signals from minor BB touches.
 
         Returns ``(direction, confidence)`` or ``None``.
         """
@@ -348,12 +350,12 @@ class StrategyEngine:
         if prev_price is None or prev_bb_lower is None or prev_bb_upper is None:
             return None
 
-        # BUY: price crosses below lower BB
-        if prev_price >= prev_bb_lower and price < bb_lower:
+        # BUY: price crosses below lower BB AND RSI confirms oversold
+        if prev_price >= prev_bb_lower and price < bb_lower and rsi < 40:
             return ("BUY", self._BASE_CONFIDENCE["mean_reversion"])
 
-        # SELL: price crosses above upper BB
-        if prev_price <= prev_bb_upper and price > bb_upper:
+        # SELL: price crosses above upper BB AND RSI confirms overbought
+        if prev_price <= prev_bb_upper and price > bb_upper and rsi > 60:
             return ("SELL", self._BASE_CONFIDENCE["mean_reversion"])
 
         return None

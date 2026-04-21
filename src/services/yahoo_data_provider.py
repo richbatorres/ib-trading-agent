@@ -87,6 +87,8 @@ class YahooDataProvider:
 
         if updated > 0:
             logger.info("Yahoo data: updated %d/%d symbols", updated, len(self._watchlist))
+        else:
+            logger.debug("Yahoo data: no new data for any symbol")
 
         return updated
 

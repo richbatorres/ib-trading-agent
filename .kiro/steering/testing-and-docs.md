@@ -87,3 +87,30 @@ After every significant change:
 3. **Remove dead code** — delete commented-out code, unused functions, or unreachable branches.
 4. **Keep files focused** — if a module grows beyond ~300 lines, consider splitting it.
 5. **Consistent style** — follow the existing code style (docstrings, type hints, logging patterns).
+
+## Backup
+
+After every significant session or before ending work:
+
+1. **Run backup** to `G:\My Drive\Documents\practice\kiro-backup\`:
+   - `.kiro/` folder (steering, specs, settings)
+   - `.env` and `.env.example`
+   - `docs/` folder
+   - `pyproject.toml` and `README.md`
+2. **Use this script pattern**:
+```python
+import shutil, os
+src = 'G:/My Drive/Documents/practice/trading agent'
+dst = 'G:/My Drive/Documents/practice/kiro-backup'
+os.makedirs(dst, exist_ok=True)
+kiro_dst = os.path.join(dst, '.kiro')
+if os.path.exists(kiro_dst): shutil.rmtree(kiro_dst)
+shutil.copytree(os.path.join(src, '.kiro'), kiro_dst)
+docs_dst = os.path.join(dst, 'docs')
+if os.path.exists(docs_dst): shutil.rmtree(docs_dst)
+shutil.copytree(os.path.join(src, 'docs'), docs_dst)
+for f in ['.env', '.env.example', 'pyproject.toml', 'README.md']:
+    p = os.path.join(src, f)
+    if os.path.exists(p): shutil.copy2(p, os.path.join(dst, f))
+```
+3. **When to backup**: after adding new features, fixing bugs, changing config, or before ending a session.

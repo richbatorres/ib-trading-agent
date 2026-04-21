@@ -50,6 +50,27 @@ python agent.py status   # Show portfolio and agent state
 python agent.py report   # Generate and send report now
 ```
 
+## Live Dashboard
+
+The agent includes a browser-based live log dashboard that shows today's log messages, portfolio status, trade signals, and more.
+
+```bash
+# Start the dashboard server (default port 8888)
+python scripts/dashboard_server.py
+
+# Or with a custom port
+python scripts/dashboard_server.py 9000
+```
+
+Then open `http://localhost:8888/dashboard.html` in your browser.
+
+The dashboard server filters logs server-side via `/api/log/today`, so only today's lines are sent to the browser — keeping the page fast even after weeks of accumulated logs.
+
+When using PM2, the dashboard server starts automatically alongside the agent:
+```bash
+pm2 start ecosystem.config.js   # Starts both agent and dashboard server
+```
+
 ## Running Tests
 
 ```bash

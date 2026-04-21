@@ -1,0 +1,116 @@
+Izvršit ćeš sljedeće zadatke sekvencijalno,
+pri čemu svaki korak gradi na rezultatima prethodnog.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+KORAK 1 — ANALIZA PERFORMANSI (uloga: iskusni broker)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Dohvati sve dostupne podatke direktno s IBKR-a:
+- Kompletna povijest trade-ova (datumi, dionice, ulaz/izlaz, P&L)
+- Trenutni sastav portfolija i otvorene pozicije
+- Dnevni/tjedni/ukupni P&L
+- Sharpe ratio, max drawdown, win rate ako su dostupni
+
+Napravi pisanu analizu koja uključuje:
+1. Dijagnozu trenutnog stanja — zašto je portfolio koncentriran
+   isključivo u Apple dionicama? Je li to rezultat strategije,
+   nedostatka signala za druge dionice ili buga?
+2. Identifikaciju slabosti trenutne strategije (loši entry/exit signali,
+   nedovoljna diversifikacija, propuštene prilike itd.)
+3. Konkretne metrike koje pokazuju gdje agent underperformira
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+KORAK 2 — STRATEGIJA POBOLJŠANJA (uloga: iskusni broker)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Na temelju analize iz Koraka 1, kreiraj detaljnu strategiju poboljšanja:
+- Definiraj konkretne izmjene signal logike (koji indikatori, koji pragovi)
+- Predloži bolji universe dionica koji agent treba pratiti
+- Odredi optimalne position sizing parametre za trenutni kapital
+- Specificira jasne entry i exit kriterije za svaku strategijsku komponentu
+- Dokumentiraj očekivane performansne ciljeve nakon implementacije
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+KORAK 3 — IMPLEMENTACIJA (uloga: senior SW designer i engineer)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Implementiraj strategiju iz Koraka 2 u postojeću codebazu:
+- Prije ikakvih izmjena, napravi git commit trenutnog stanja kao backup
+- Dizajniraj izmjene prije pisanja koda — dokumentiraj koje module
+  mijenjаš i zašto
+- Implementiraj izmjene po modulima, jedan po jedan
+- Pazi na postojeće arhitekturalne principe (async/await, NumPy
+  vektorizacija, LLM nije u hot path-u — vidi sekcije 11 i 13 prompta)
+- Nakon svake izmjene provjeri da postojeći testovi prolaze
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+KORAK 4 — PLANIRANJE TESTOVA (uloga: iskusni SW tester)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Prije implementacije testova, napravi plan koji specificira:
+- Na kojoj razini (unit / integracijski / performance / backtest)
+  je svaki aspekt nove strategije najpriklадnije testirati i zašto
+- Koje granične slučajeve (edge cases) treba pokriti:
+    * Što se dogodi ako nema likvidnih dionica koje zadovoljavaju
+      nove kriterije?
+    * Što ako svi signali istovremeno daju buy za više dionica?
+    * Što ako tržište otvori s gap-om koji preskače stop-loss razinu?
+    * Što ako IBKR API vrati nepotpune ili zakašnjele podatke?
+- Koje negativne testove treba pisati (scenariji gdje agent NE smije
+  napraviti trade)
+- Koje pozitivne testove treba pisati (scenariji gdje agent MORA
+  napraviti trade)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+KORAK 5 — IMPLEMENTACIJA I POKRETANJE TESTOVA (uloga: senior SW tester)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Implementiraj sve testove prema planu iz Koraka 4, koristeći pytest.
+Zahtjevi:
+- Svi testovi moraju biti deterministički (fiksirani seed, mockani
+  external API pozivi)
+- Svaki test mora imati jasan docstring koji opisuje što testira
+  i zašto je taj slučaj važan
+- Grupiraj testove u datoteke po tipu (unit/integ/perf/backtest)
+
+Nakon implementacije pokreni sve testove:
+  python agent.py test
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+KORAK 6 — TEST REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Generiraj strukturirani test report koji uključuje:
+
+1. SAŽETAK
+   - Ukupan broj testova / prošlo / palo / preskočeno
+   - Ukupno trajanje izvođenja
+
+2. REZULTATI PO KATEGORIJAMA
+   - Unit testovi: [N prošlo, N palo]
+   - Integracijski testovi: [N prošlo, N palo]
+   - Performance testovi: [N prošlo, N palo] + izmjerene latencije
+   - Backtest smoke testovi: [N prošlo, N palo]
+
+3. DETALJI PALIH TESTOVA
+   - Naziv testa, očekivani vs. stvarni rezultat, stack trace
+
+4. COVERAGE ANALIZA
+   - Koji dijelovi nove strategije nisu pokriveni testovima i zašto
+
+5. PREPORUKE
+   - Ako neki testovi padaju, predloži konkretne ispravke
+   - Ako su svi zeleni, potvrdi da je implementacija spremna za
+     paper trading validaciju
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OPĆE NAPOMENE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+- Izvršavaj korake sekvencijalno — ne prelazi na sljedeći dok
+  trenutni nije potpun
+- Na kraju svakog koraka ispiši kratki sažetak što je napravljeno
+  i što slijedi
+- Ako naiđeš na nejednoznačnost ili problem koji zahtijeva odluku,
+  dokumentiraj je i navedi koju si opciju odabrao i zašto
+- Također implemenitraj sva već postojeća pravila iz environment i steering dokumenata

@@ -65,6 +65,7 @@ PM2 is a cross-platform process manager for Node.js that also supports Python sc
    ```bash
    pm2 status
    pm2 logs ib-trading-agent
+   pm2 logs dashboard-server
    pm2 monit
    ```
 
@@ -77,7 +78,14 @@ PM2 is a cross-platform process manager for Node.js that also supports Python sc
 5. Stop:
    ```bash
    pm2 stop ib-trading-agent
+   pm2 stop dashboard-server
+   # Or stop all:
+   pm2 stop all
    ```
+
+The `ecosystem.config.js` defines two processes:
+- **ib-trading-agent** — the main trading agent
+- **dashboard-server** — lightweight HTTP server for the live log dashboard at `http://localhost:8888/dashboard.html`
 
 ---
 

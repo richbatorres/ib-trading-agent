@@ -557,12 +557,26 @@ class TradingAgent:
                 })
 
             account = {}
+            wanted_tags = {
+                "NetLiquidation", "TotalCashBalance",
+                "UnrealizedPnL", "RealizedPnL", "GrossPositionValue",
+            }
+            # First pass: prefer BASE currency
             for av in ib.accountValues():
-                if av.currency == "BASE" and av.tag in (
-                    "NetLiquidation", "TotalCashBalance",
-                    "UnrealizedPnL", "RealizedPnL", "GrossPositionValue",
-                ):
+                if av.currency == "BASE" and av.tag in wanted_tags:
                     account[av.tag] = float(av.value)
+            # Second pass: fill missing tags from USD
+            for av in ib.accountValues():
+                if av.tag in wanted_tags and av.tag not in account:
+                    if av.currency == "USD":
+                        account[av.tag] = float(av.value)
+            # Fallback: fill missing tags from any currency
+            for av in ib.accountValues():
+                if av.tag in wanted_tags and av.tag not in account:
+                    try:
+                        account[av.tag] = float(av.value)
+                    except (ValueError, TypeError):
+                        pass
 
             fills_today = len(ib.fills())
 

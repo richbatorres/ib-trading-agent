@@ -19,8 +19,9 @@ logger = logging.getLogger(__name__)
 _PAPER_PORTS = {7497, 4002}  # TWS paper, Gateway paper
 _LIVE_PORTS = {7496, 4001}   # TWS live, Gateway live
 
-# Use a high clientId to avoid conflicts with other IB sessions (TWS, web portal)
-_CLIENT_ID = 99
+# Use a high clientId to avoid conflicts with other IB sessions
+# Changed from 99 to 77 to avoid stale connection conflicts
+_CLIENT_ID = 77
 
 
 class ConnectionManager:

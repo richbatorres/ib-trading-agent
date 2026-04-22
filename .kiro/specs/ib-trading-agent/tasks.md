@@ -545,3 +545,13 @@ Build an autonomous AI trading agent for Interactive Brokers from scratch. The i
 - All file paths use relative paths for cross-platform compatibility (Windows/Mac/Linux)
 - All technical indicator calculations must use NumPy vectorized operations (no Python for-loops on price arrays)
 - LLM API calls are limited to MAX_LLM_CALLS_PER_DAY (default 10) and logged with token counts for cost tracking
+
+## Post-Implementation Fixes
+
+- [x] 27. Fix: AvailableFunds for cash reading (B6) — April 22, 2026
+  - [x] 27.1 Replace TotalCashBalance with AvailableFunds in `_read_portfolio_from_ib()`
+    - **Problem:** IB margin/paper accounts report `TotalCashBalance` as negative (e.g., -$268,876) when positions are held on margin. This caused `calculate_position_size()` to always return 0 shares, rejecting every trade.
+    - **Fix:** New fallback chain for cash: `AvailableFunds` (BASE → USD) → `BuyingPower × 0.25` → `NetLiquidation − GrossPositionValue` → `NetLiquidation × 0.10`
+    - **Files changed:** `src/agent.py` (`_read_portfolio_from_ib()`, `_export_portfolio_json()`), `agent.py` (reconnect logic)
+    - **Verified:** Agent immediately executed BUY 1040 TXN @ $235.14 after restart
+    - _Requirements: 12.1, 12.2_

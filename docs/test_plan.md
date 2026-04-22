@@ -7,6 +7,7 @@
 
 ### Unit Tests (tests/unit/)
 - Portfolio value reading helper (`_read_portfolio_from_ib`)
+- Available funds cash reading (AvailableFunds fallback chain)
 - Trade closing with P&L (`StateManager.close_trade`)
 - Updated momentum strategy thresholds
 - Updated mean reversion with RSI confirmation
@@ -32,6 +33,10 @@
 | BASE currency only | Unit | Reads correctly from BASE |
 | USD currency only | Unit | Falls back to USD |
 | Mixed currencies | Unit | Prefers BASE over USD |
+| Negative TotalCashBalance | Unit | Uses AvailableFunds instead |
+| No AvailableFunds tag | Unit | Falls back to BuyingPower×0.25 |
+| No BuyingPower tag | Unit | Falls back to NLV−GrossPositionValue |
+| All cash tags missing | Unit | Falls back to NLV×0.10 |
 | No OPEN trade for SELL | Unit | `close_trade` returns None |
 | Multiple OPEN trades | Unit | Closes oldest first |
 | Confidence exactly at threshold | Unit | 0.65 passes, 0.64 doesn't |
@@ -45,6 +50,7 @@
 - MUST NOT execute trade with confidence < 0.65
 - MUST NOT generate SELL signal for unheld stock (at agent level)
 - MUST NOT use stale portfolio value of 0
+- MUST NOT use negative TotalCashBalance for position sizing (use AvailableFunds)
 - Mean reversion MUST NOT fire if RSI is in neutral zone (40-60)
 
 ## 4. Positive Tests (Agent MUST trade)

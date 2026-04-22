@@ -73,6 +73,7 @@ None. All 284 tests pass.
 - ✅ Snapshot P&L computation
 
 ### Not covered (and why):
+- **AvailableFunds cash reading (B6 fix, April 2026)**: Uses AvailableFunds instead of TotalCashBalance for cash in `_read_portfolio_from_ib()`. TotalCashBalance is negative on margin accounts, causing all trades to be rejected. Fallback chain: AvailableFunds → BuyingPower×0.25 → NLV−GrossPositionValue → NLV×0.10. Verified by live paper trading (first trade executed immediately after fix). Unit test update recommended.
 - **Yahoo data provider log level change**: Trivial change (INFO → DEBUG), verified by code review
 - **Full integration test of _process_tick_async with confidence filter**: Would require complex async mocking of the full pipeline; the unit tests cover the threshold logic and the existing agent tests cover the pipeline
 - **Polymarket sentiment fix**: The sentiment service code was not changed; the broken behavior is an API response format issue that requires live API testing
@@ -92,3 +93,28 @@ All tests are green. The implementation is ready for paper trading validation.
    - Log file size stays reasonable (< 50 MB/day)
 3. After a few days, check the database for `realized_pnl` values on closed trades
 4. Review the Polymarket API responses to diagnose the 0.991/0.0 sentiment issue
+
+---
+
+## 6. Post-Deployment Update (April 22, 2026)
+
+### Bug B6: Negative Cash on Margin Accounts
+
+After deploying the performance boost fixes, all trades were still being rejected with:
+```
+Trade REJECTED for <symbol>: position size is 0 (price=X, portfolio=978528, cash=-268876)
+```
+
+**Root cause:** `_read_portfolio_from_ib()` used `TotalCashBalance` (BASE currency) which IB reports as **-$268,876** on margin paper accounts. This negative cash caused `calculate_position_size()` to compute `available_cash < 0` → 0 shares → every trade rejected.
+
+**Fix applied:** Replaced `TotalCashBalance` with `AvailableFunds` for the cash component. Fallback chain:
+1. `AvailableFunds` (BASE → USD)
+2. `BuyingPower × 0.25`
+3. `NetLiquidation − GrossPositionValue`
+4. `NetLiquidation × 0.10`
+
+Also fixed reconnect logic in `agent.py` (root) that was passing `NetLiquidation` as both value and cash.
+
+**Verification:** After restart, agent immediately executed: BUY 1040 TXN @ $235.14 with stop-loss at $223.38. Trade filled, persisted, and position tracked correctly.
+
+**Recommendation:** Add unit tests for `_read_portfolio_from_ib()` covering the AvailableFunds fallback chain, especially the negative TotalCashBalance scenario.

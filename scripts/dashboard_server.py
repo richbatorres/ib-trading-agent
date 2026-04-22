@@ -23,14 +23,29 @@ from http.server import HTTPServer, SimpleHTTPRequestHandler
 MAX_LINES = 2000
 
 # Auto-detect the runtime logs directory
+# Prefer the log file that was most recently written to.
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _RUNTIME_LOGS = r"C:\temp\trading-agent\logs"
 _WORKSPACE_LOGS = os.path.join(_PROJECT_ROOT, "logs")
 
-if os.path.isdir(_RUNTIME_LOGS) and os.path.isfile(os.path.join(_RUNTIME_LOGS, "agent.log")):
-    LOGS_DIR = _RUNTIME_LOGS
-else:
-    LOGS_DIR = _WORKSPACE_LOGS
+_runtime_log = os.path.join(_RUNTIME_LOGS, "agent.log")
+_workspace_log = os.path.join(_WORKSPACE_LOGS, "agent.log")
+
+def _pick_logs_dir() -> str:
+    """Choose the logs directory with the most recently written agent.log."""
+    runtime_exists = os.path.isfile(_runtime_log)
+    workspace_exists = os.path.isfile(_workspace_log)
+
+    if runtime_exists and workspace_exists:
+        # Pick whichever was written to more recently
+        if os.path.getmtime(_workspace_log) >= os.path.getmtime(_runtime_log):
+            return _WORKSPACE_LOGS
+        return _RUNTIME_LOGS
+    if runtime_exists:
+        return _RUNTIME_LOGS
+    return _WORKSPACE_LOGS
+
+LOGS_DIR = _pick_logs_dir()
 
 LOG_FILE = os.path.join(LOGS_DIR, "agent.log")
 

@@ -18,6 +18,23 @@
 
 This ensures consistent portfolio value reading across all code paths.
 
+**Status:** ✅ Fixed (April 20, 2025)
+
+### Fix 1.6: Available Funds for Cash Reading (B6)
+**Module:** `src/agent.py` — `_read_portfolio_from_ib()`, `agent.py` (root) reconnect logic
+
+**Problem:** `_read_portfolio_from_ib()` used `TotalCashBalance` for the cash component, but IB margin/paper accounts report this as a large negative number (e.g., -$268,876) when positions are held on margin. This caused `calculate_position_size()` to always compute `available_cash < 0` → 0 shares → every trade rejected with "position size is 0".
+
+**Solution:** Replace `TotalCashBalance` with `AvailableFunds` (what IB allows for new positions). Fallback chain for cash:
+1. `AvailableFunds` (BASE → USD) — actual buying power for new positions
+2. `BuyingPower × 0.25` — conservative estimate (RegT margin = 4× AvailableFunds)
+3. `NetLiquidation − GrossPositionValue` — computed available cash
+4. `NetLiquidation × 0.10` — absolute fallback (10% of portfolio)
+
+Also fixed the reconnect logic in `agent.py` (root) which was passing `NetLiquidation` as both total_value AND cash — now uses `_read_portfolio_from_ib()`.
+
+**Status:** ✅ Fixed (April 22, 2026)
+
 ### Fix 1.2: Trade Closing with P&L (B2)
 **Modules:** `src/services/order_executor.py`, `src/services/state_manager.py`
 
@@ -116,7 +133,7 @@ The current parameters are appropriate for a $1M paper account:
 - `STOP_LOSS_PCT=5` — reasonable per-position risk
 - `MAX_PORTFOLIO_LOSS_PCT=20` — hard stop at $200K loss
 
-The problem isn't the parameters — it's that `calculate_position_size()` gets `portfolio_value=0` due to bug B1.
+The problem isn't the parameters — it's that `calculate_position_size()` gets `portfolio_value=0` due to bug B1, and `cash=-268876` (negative) due to bug B6 (TotalCashBalance is negative on margin accounts).
 
 ---
 
@@ -163,9 +180,11 @@ After implementing all fixes and improvements:
 
 ## 6. Implementation Order
 
-1. **Bug fixes first** (B1→B2→B3→B4→B5→O3) — these unlock the agent's basic functionality
+1. **Bug fixes first** (B1→B2→B3→B4→B5→O3→B6) — these unlock the agent's basic functionality
 2. **Strategy improvements** (2.1→2.2→2.3) — tune signal quality
 3. **Tests** — verify all changes
 4. **Documentation** — update design.md, requirements.md, tasks.md
+
+**Status:** B1-B5, O3 fixed April 20, 2025. B6 fixed April 22, 2026.
 
 **Next step:** KORAK 3 — Implementation

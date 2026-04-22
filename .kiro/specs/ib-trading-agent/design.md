@@ -19,6 +19,7 @@ The system is built on Python's `asyncio` event loop. The `ib_insync` library pr
 9. **Yahoo Finance data provider** — Free alternative to IB market data subscriptions for paper trading. Polls 1-minute bars every 10 seconds. Configurable via `MARKET_DATA_TYPE=yahoo` in `.env`.
 10. **Crash-resilient main loop** — Agent never exits on its own. Survives IB Gateway crashes, internet outages, and any exception. Reconnects automatically. Only SIGTERM/KeyboardInterrupt can stop it.
 11. **RiskManager v2 safety checks** — No short selling, no duplicate positions per symbol, max 90% total portfolio exposure (no margin), 60-second cooldown between trades on same symbol, position tracking after every trade.
+12. **AvailableFunds for cash reading** — `_read_portfolio_from_ib()` uses IB's `AvailableFunds` tag instead of `TotalCashBalance` for the cash component. On margin accounts (including paper trading), `TotalCashBalance` is negative, which breaks position sizing. Fallback chain: `AvailableFunds` → `BuyingPower × 0.25` → `NetLiquidation − GrossPositionValue` → `NetLiquidation × 0.10`.
 
 ## Architecture
 
@@ -1053,6 +1054,8 @@ tests/
 ### Bug Fixes Applied
 
 1. **Portfolio value reading (B1):** Extracted `_read_portfolio_from_ib()` helper with multi-fallback chain (BASE → USD → any currency). Used consistently in `initialize()`, `_check_portfolio_loss()`, `_take_portfolio_snapshot()`, and `_process_tick_async()`.
+
+6. **Available funds for cash reading (B6):** Replaced `TotalCashBalance` with `AvailableFunds` for the cash component in `_read_portfolio_from_ib()`. IB margin/paper accounts report `TotalCashBalance` as negative when positions are held on margin, which caused `calculate_position_size()` to always return 0 and reject every trade. The new fallback chain for cash is: `AvailableFunds` (BASE → USD) → `BuyingPower × 0.25` → `NetLiquidation − GrossPositionValue` → `NetLiquidation × 0.10`. Also fixed the reconnect logic in `agent.py` (root) to use `_read_portfolio_from_ib()` instead of reading `NetLiquidation` directly as both value and cash.
 
 2. **Trade closing with P&L (B2):** Added `StateManager.close_trade()` method. `OrderExecutor._handle_fill()` now differentiates BUY (create OPEN record + stop-loss) from SELL (close matching OPEN record with realized P&L).
 

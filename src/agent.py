@@ -267,13 +267,19 @@ class TradingAgent:
     # ------------------------------------------------------------------
 
     def _read_portfolio_from_ib(self) -> Tuple[float, float]:
-        """Read portfolio total value and cash from IB account values.
+        """Read portfolio total value and available cash from IB account values.
 
         Uses a multi-fallback chain to handle different IB account
         currency reporting (BASE → USD → any):
         1. Try ``currency == "BASE"`` first (paper accounts)
         2. Fallback to ``currency == "USD"``
         3. Fallback to any available currency
+
+        For cash, we use **AvailableFunds** (what can actually be spent on
+        new positions) rather than TotalCashBalance, which can be negative
+        on margin accounts and causes the RiskManager to reject every trade.
+        Fallback chain for cash: AvailableFunds → BuyingPower →
+        TotalCashBalance → NetLiquidation − GrossPositionValue.
 
         Returns ``(total_value, cash)``. Both are 0.0 if unavailable.
         """
@@ -283,34 +289,48 @@ class TradingAgent:
         total_value = 0.0
         cash = 0.0
 
-        # Pass 1: prefer BASE currency
+        # Collect all relevant tags into a dict keyed by (tag, currency)
+        av_map: dict[tuple[str, str], float] = {}
         for av in account_values:
-            if av.tag == "NetLiquidation" and av.currency == "BASE":
-                total_value = float(av.value)
-            elif av.tag == "TotalCashBalance" and av.currency == "BASE":
-                cash = float(av.value)
+            try:
+                av_map[(av.tag, av.currency)] = float(av.value)
+            except (ValueError, TypeError):
+                continue
 
-        # Pass 2: fallback to USD
+        # --- Total value: NetLiquidation (BASE → USD → any) ---
+        total_value = av_map.get(("NetLiquidation", "BASE"), 0.0)
         if total_value == 0:
-            for av in account_values:
-                if av.tag == "NetLiquidation" and av.currency == "USD":
-                    total_value = float(av.value)
-                elif av.tag == "CashBalance" and av.currency == "USD":
-                    cash = float(av.value)
-
-        # Pass 3: fallback to any currency
+            total_value = av_map.get(("NetLiquidation", "USD"), 0.0)
         if total_value == 0:
-            for av in account_values:
-                if av.tag == "NetLiquidation":
-                    try:
-                        total_value = float(av.value)
-                    except (ValueError, TypeError):
-                        continue
+            for (tag, cur), val in av_map.items():
+                if tag == "NetLiquidation":
+                    total_value = val
                     break
 
-        # If we found total_value but no cash, assume all cash
-        if total_value > 0 and cash == 0:
-            cash = total_value
+        # --- Cash: AvailableFunds → BuyingPower → computed fallback ---
+        # AvailableFunds = what IB allows you to spend on new positions
+        # This is always positive and accounts for margin requirements.
+        cash = av_map.get(("AvailableFunds", "BASE"), 0.0)
+        if cash <= 0:
+            cash = av_map.get(("AvailableFunds", "USD"), 0.0)
+        if cash <= 0:
+            # BuyingPower is typically 4× AvailableFunds for RegT margin
+            buying_power = av_map.get(("BuyingPower", "BASE"), 0.0)
+            if buying_power <= 0:
+                buying_power = av_map.get(("BuyingPower", "USD"), 0.0)
+            if buying_power > 0:
+                # Conservative: use 25% of buying power (≈ AvailableFunds)
+                cash = buying_power * 0.25
+        if cash <= 0:
+            # Last resort: NLV minus gross position value
+            gross = av_map.get(("GrossPositionValue", "BASE"), 0.0)
+            if gross <= 0:
+                gross = av_map.get(("GrossPositionValue", "USD"), 0.0)
+            if total_value > 0 and gross >= 0:
+                cash = total_value - gross
+        if cash <= 0 and total_value > 0:
+            # Absolute fallback: assume 10% of NLV is available
+            cash = total_value * 0.10
 
         return total_value, cash
 
@@ -587,7 +607,7 @@ class TradingAgent:
 
             account = {}
             wanted_tags = {
-                "NetLiquidation", "TotalCashBalance",
+                "NetLiquidation", "TotalCashBalance", "AvailableFunds",
                 "UnrealizedPnL", "RealizedPnL", "GrossPositionValue",
             }
             # First pass: prefer BASE currency

@@ -131,13 +131,11 @@ async def _run_agent_loop(config: AgentConfig) -> None:
                             try:
                                 await agent._connection_manager.connect()
                                 ib.sleep(2)  # sync account data
-                                # Re-initialize portfolio
-                                account_values = ib.accountValues()
-                                for av in account_values:
-                                    if av.tag == "NetLiquidation" and av.currency == "BASE":
-                                        agent._risk_manager.update_portfolio(float(av.value), float(av.value))
-                                        logger.info("Portfolio re-initialized after reconnect: %.2f", float(av.value))
-                                        break
+                                # Re-initialize portfolio using the proper method
+                                total_value, cash = agent._read_portfolio_from_ib()
+                                if total_value > 0:
+                                    agent._risk_manager.update_portfolio(total_value, cash)
+                                    logger.info("Portfolio re-initialized after reconnect: value=%.2f, cash=%.2f", total_value, cash)
                                 logger.info("IB Gateway reconnected!")
                             except Exception as exc:
                                 logger.debug("Reconnect attempt failed: %s", exc)

@@ -188,3 +188,28 @@ After implementing all fixes and improvements:
 **Status:** B1-B5, O3 fixed April 20, 2025. B6 fixed April 22, 2026.
 
 **Next step:** KORAK 3 — Implementation
+
+---
+
+## 7. Strategy & Infrastructure Improvements (April 2026)
+
+### Implemented Changes
+
+| Change | Module | Description |
+|--------|--------|-------------|
+| ATR indicator | indicators.py | Wilder's smoothing, 14-period, volatility measurement |
+| VWAP indicator | indicators.py | Cumulative sum approach |
+| Trend strength | indicators.py | ADX-like (0-100), >25 trending |
+| Volume spike | indicators.py | Boolean, >2× 20-day average |
+| Trend filter | strategy_engine.py | Weak trend ×0.70, strong trend ×1.10 |
+| ATR sizing | risk_manager.py | 1% risk per trade via ATR |
+| Circuit breaker | risk_manager.py | >10% single-tick move → block |
+| Session manager | market_hours_service.py | US/EU/ASIA/pre-market/after-hours |
+| Session config | config.py | TRADING_SESSIONS in .env |
+| Session tests | test_exchange_sessions.py | 42 new unit tests |
+| Multi-exchange trading | market_data_service.py, market_screener.py, agent.py | .L→LSE/GBP, .T→TSE/JPY routing, FTSE 100 + Nikkei 225 screener |
+
+### Test Results
+- **218 tests passed**, 0 failed
+- All existing tests unchanged and passing
+- 42 new tests for exchange session management

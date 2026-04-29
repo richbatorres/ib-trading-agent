@@ -33,6 +33,7 @@ class AgentConfig:
     llm_model: str = "claude-sonnet-4-6"
     max_llm_calls_per_day: int = 10
     market_data_type: str = "4"  # "1"=real-time, "3"=delayed, "4"=frozen, "yahoo"=Yahoo Finance
+    trading_sessions: str = "US"  # Comma-separated: "US", "US,EU", "US,EU,ASIA"
 
     @classmethod
     def from_env(cls, path: str = ".env") -> "AgentConfig":
@@ -77,4 +78,5 @@ class AgentConfig:
             llm_model=values.get("LLM_MODEL", "claude-sonnet-4-6"),
             max_llm_calls_per_day=int(values.get("MAX_LLM_CALLS_PER_DAY", "10")),
             market_data_type=values.get("MARKET_DATA_TYPE", "4"),
+            trading_sessions=values.get("TRADING_SESSIONS", "US"),
         )

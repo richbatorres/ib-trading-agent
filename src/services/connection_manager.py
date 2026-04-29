@@ -8,6 +8,7 @@ Requirements: 1.1, 1.2, 1.3, 1.4, 1.5
 
 import asyncio
 import logging
+import random
 
 from ib_insync import IB
 
@@ -19,9 +20,15 @@ logger = logging.getLogger(__name__)
 _PAPER_PORTS = {7497, 4002}  # TWS paper, Gateway paper
 _LIVE_PORTS = {7496, 4001}   # TWS live, Gateway live
 
-# Use a high clientId to avoid conflicts with other IB sessions
-# Changed from 99 to 77 to avoid stale connection conflicts
-_CLIENT_ID = 77
+
+def _generate_client_id() -> int:
+    """Generate a random clientId (1-999) to avoid stale connection conflicts.
+
+    IB Gateway keeps old connections alive for ~30-60s after ungraceful
+    disconnect.  Using a random clientId on each startup avoids the
+    'clientId already in use' error.
+    """
+    return random.randint(1, 999)
 
 
 class ConnectionManager:
@@ -35,11 +42,13 @@ class ConnectionManager:
     def __init__(self, config: AgentConfig) -> None:
         self._ib = IB()
         self._config = config
+        self._client_id: int = _generate_client_id()
         self._reconnect_attempts: int = 0
         self._max_reconnect_attempts: int = 5
         self._reconnect_interval: int = 30  # seconds between reconnect attempts
         self._waiting_interval: int = 60    # seconds between retries after max failures
         self._reconnecting: bool = False
+        self._events_wired: bool = False
 
     # ------------------------------------------------------------------
     # Public API
@@ -61,24 +70,31 @@ class ConnectionManager:
         """
         self._validate_environment()
 
-        # Wire event handlers before connecting
-        self._ib.disconnectedEvent += self._on_disconnected
-        self._ib.connectedEvent += self._on_connected
-        self._ib.errorEvent += self._on_error
+        # Wire event handlers only once (avoid duplicate handlers on reconnect)
+        if not self._events_wired:
+            self._ib.disconnectedEvent += self._on_disconnected
+            self._ib.connectedEvent += self._on_connected
+            self._ib.errorEvent += self._on_error
+            self._events_wired = True
+
+        # Disconnect any stale connection before reconnecting
+        if self._ib.isConnected():
+            self._ib.disconnect()
+            await asyncio.sleep(1)
 
         logger.info(
             "Connecting to IB %s at %s:%d (clientId=%d, environment=%s)",
             "TWS/Gateway",
             self._config.ib_host,
             self._config.ib_port,
-            _CLIENT_ID,
+            self._client_id,
             self._config.environment,
         )
 
         await self._ib.connectAsync(
             host=self._config.ib_host,
             port=self._config.ib_port,
-            clientId=_CLIENT_ID,
+            clientId=self._client_id,
             readonly=False,
         )
 
@@ -117,6 +133,9 @@ class ConnectionManager:
         logs an ERROR and enters a waiting state that retries every
         ``_waiting_interval`` seconds.
 
+        Each reconnection attempt uses a fresh random clientId to avoid
+        'clientId already in use' errors from stale IB Gateway sessions.
+
         Requirement: 1.2, 1.3
         """
         if self._reconnecting:
@@ -138,10 +157,15 @@ class ConnectionManager:
                 await asyncio.sleep(self._reconnect_interval)
 
                 try:
+                    # Fresh clientId to avoid stale connection conflicts
+                    self._client_id = _generate_client_id()
+                    if self._ib.isConnected():
+                        self._ib.disconnect()
+                        await asyncio.sleep(1)
                     await self._ib.connectAsync(
                         host=self._config.ib_host,
                         port=self._config.ib_port,
-                        clientId=_CLIENT_ID,
+                        clientId=self._client_id,
                         readonly=False,
                     )
                     # Success — counter is reset in _on_connected
@@ -165,10 +189,14 @@ class ConnectionManager:
             while True:
                 await asyncio.sleep(self._waiting_interval)
                 try:
+                    self._client_id = _generate_client_id()
+                    if self._ib.isConnected():
+                        self._ib.disconnect()
+                        await asyncio.sleep(1)
                     await self._ib.connectAsync(
                         host=self._config.ib_host,
                         port=self._config.ib_port,
-                        clientId=_CLIENT_ID,
+                        clientId=self._client_id,
                         readonly=False,
                     )
                     # Success — counter is reset in _on_connected

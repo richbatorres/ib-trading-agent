@@ -121,8 +121,16 @@ class RiskManager:
 
         # --- BUY path continues ---
 
-        # Calculate proposed quantity
-        quantity = self.calculate_position_size(signal.price)
+        # Calculate proposed quantity — use volatility-adjusted sizing if ATR available
+        atr_value = signal.indicators.get("atr") if signal.indicators else None
+        if atr_value is not None and atr_value > 0:
+            quantity = self.calculate_volatility_adjusted_size(signal.price, atr_value)
+            logger.info(
+                "Using volatility-adjusted sizing for %s: ATR=%.2f, shares=%d",
+                signal.symbol, atr_value, quantity,
+            )
+        else:
+            quantity = self.calculate_position_size(signal.price)
         if quantity <= 0:
             logger.warning(
                 "Trade REJECTED for %s: position size is 0 (price=%.2f, portfolio=%.2f, cash=%.2f)",
@@ -132,29 +140,60 @@ class RiskManager:
 
         proposed_value = quantity * signal.price
 
-        # 5. Total exposure check — no margin
+        # 5. Total exposure check — reduce quantity to fit within limit
         total_positions_value = sum(
             abs(p.get("quantity", 0) * p.get("current_price", p.get("entry_price", 0)))
             for p in self._open_positions.values()
         )
         max_total_exposure = (self._MAX_TOTAL_EXPOSURE_PCT / 100.0) * self._current_portfolio_value
-        if total_positions_value + proposed_value > max_total_exposure:
+        available_exposure = max_total_exposure - total_positions_value
+        if available_exposure <= 0:
             logger.warning(
-                "Trade REJECTED for %s: total exposure %.2f + %.2f > max %.2f (%.0f%% of portfolio)",
-                signal.symbol, total_positions_value, proposed_value,
-                max_total_exposure, self._MAX_TOTAL_EXPOSURE_PCT,
+                "Trade REJECTED for %s: portfolio fully allocated (exposure %.2f >= max %.2f)",
+                signal.symbol, total_positions_value, max_total_exposure,
             )
             return None
+        if proposed_value > available_exposure:
+            # Reduce quantity to fit within remaining exposure
+            reduced_quantity = math.floor(available_exposure / signal.price)
+            if reduced_quantity <= 0:
+                logger.warning(
+                    "Trade REJECTED for %s: insufficient exposure headroom (available %.2f, price %.2f)",
+                    signal.symbol, available_exposure, signal.price,
+                )
+                return None
+            logger.info(
+                "Reducing position for %s: %d → %d shares to fit exposure limit "
+                "(available %.2f of max %.2f)",
+                signal.symbol, quantity, reduced_quantity,
+                available_exposure, max_total_exposure,
+            )
+            quantity = reduced_quantity
+            proposed_value = quantity * signal.price
 
-        # 6. Cash buffer check
+        # 6. Cash buffer check — reduce quantity to preserve buffer
         cash_buffer = (self._config.cash_buffer_pct / 100.0) * self._current_portfolio_value
-        remaining_cash = self._current_cash - proposed_value
-        if remaining_cash < cash_buffer:
+        available_cash_for_trade = self._current_cash - cash_buffer
+        if available_cash_for_trade <= 0:
             logger.warning(
-                "Trade REJECTED for %s: cash buffer violation (remaining %.2f < buffer %.2f)",
-                signal.symbol, remaining_cash, cash_buffer,
+                "Trade REJECTED for %s: no cash available above buffer (cash %.2f, buffer %.2f)",
+                signal.symbol, self._current_cash, cash_buffer,
             )
             return None
+        if proposed_value > available_cash_for_trade:
+            reduced_quantity = math.floor(available_cash_for_trade / signal.price)
+            if reduced_quantity <= 0:
+                logger.warning(
+                    "Trade REJECTED for %s: insufficient cash above buffer (available %.2f, price %.2f)",
+                    signal.symbol, available_cash_for_trade, signal.price,
+                )
+                return None
+            logger.info(
+                "Reducing position for %s: %d → %d shares to preserve cash buffer",
+                signal.symbol, quantity, reduced_quantity,
+            )
+            quantity = reduced_quantity
+            proposed_value = quantity * signal.price
 
         # 7. Position size check
         max_position_value = (self._config.max_position_size_pct / 100.0) * self._current_portfolio_value
@@ -343,6 +382,86 @@ class RiskManager:
         if symbol in self._open_positions:
             del self._open_positions[symbol]
             logger.info("Position removed for %s", symbol)
+
+    def calculate_volatility_adjusted_size(self, price: float, atr: float) -> int:
+        """Calculate position size adjusted for volatility using ATR.
+
+        Risk per trade = 1% of portfolio value.
+        Shares = risk_amount / (2 × ATR), then capped by existing
+        position size and cash buffer limits.
+
+        Parameters
+        ----------
+        price : float
+            Current price of the instrument.
+        atr : float
+            Current Average True Range value.
+
+        Returns
+        -------
+        int
+            Number of shares to trade (≥ 0).
+        """
+        if price <= 0 or atr <= 0 or self._current_portfolio_value <= 0:
+            return 0
+
+        # Risk 1% of portfolio per trade
+        risk_amount = 0.01 * self._current_portfolio_value
+        # Shares based on volatility: risk_amount / (2 * ATR)
+        vol_shares = risk_amount / (2.0 * atr)
+
+        # Cap by existing position size and cash buffer limits
+        max_by_position = (
+            self._config.max_position_size_pct / 100.0
+            * self._current_portfolio_value
+            / price
+        )
+
+        cash_buffer = self._config.cash_buffer_pct / 100.0 * self._current_portfolio_value
+        available_cash = self._current_cash - cash_buffer
+        if available_cash <= 0:
+            return 0
+
+        max_by_cash = available_cash / price
+
+        max_shares = min(vol_shares, max_by_position, max_by_cash)
+        return max(0, math.floor(max_shares))
+
+    def check_circuit_breaker(
+        self, symbol: str, price: float, prev_price: float
+    ) -> bool:
+        """Return True if trade should be blocked due to anomalous price movement.
+
+        Blocks if price moved more than 10% in a single tick (flash crash
+        protection).
+
+        Parameters
+        ----------
+        symbol : str
+            Ticker symbol.
+        price : float
+            Current tick price.
+        prev_price : float
+            Previous tick price.
+
+        Returns
+        -------
+        bool
+            ``True`` if the trade should be blocked.
+        """
+        if prev_price <= 0:
+            return False
+
+        change_pct = abs(price - prev_price) / prev_price * 100.0
+        if change_pct > 10.0:
+            logger.warning(
+                "Circuit breaker triggered for %s: price moved %.2f%% "
+                "in a single tick (%.2f → %.2f)",
+                symbol, change_pct, prev_price, price,
+            )
+            return True
+
+        return False
 
     @property
     def is_hard_stop_active(self) -> bool:

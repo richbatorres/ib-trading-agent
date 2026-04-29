@@ -32,17 +32,20 @@ _runtime_log = os.path.join(_RUNTIME_LOGS, "agent.log")
 _workspace_log = os.path.join(_WORKSPACE_LOGS, "agent.log")
 
 def _pick_logs_dir() -> str:
-    """Choose the logs directory with the most recently written agent.log."""
-    runtime_exists = os.path.isfile(_runtime_log)
-    workspace_exists = os.path.isfile(_workspace_log)
+    """Choose the logs directory where the agent is actively writing.
 
-    if runtime_exists and workspace_exists:
-        # Pick whichever was written to more recently
-        if os.path.getmtime(_workspace_log) >= os.path.getmtime(_runtime_log):
-            return _WORKSPACE_LOGS
-        return _RUNTIME_LOGS
+    Always prefers the workspace logs directory since the agent runs
+    from the workspace.  The C:\\temp copy is only used for running
+    tests and may contain stale data.
+    """
+    workspace_exists = os.path.isfile(_workspace_log)
+    if workspace_exists:
+        return _WORKSPACE_LOGS
+
+    runtime_exists = os.path.isfile(_runtime_log)
     if runtime_exists:
         return _RUNTIME_LOGS
+
     return _WORKSPACE_LOGS
 
 LOGS_DIR = _pick_logs_dir()
@@ -138,11 +141,25 @@ class DashboardHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=STATIC_DIR, **kwargs)
 
+    def handle(self):
+        """Override to suppress ConnectionAbortedError / BrokenPipeError.
+
+        These occur when the browser closes the connection before the
+        server finishes sending (e.g. page refresh, tab close).  They
+        are harmless and should not spam the console.
+        """
+        try:
+            super().handle()
+        except (ConnectionAbortedError, BrokenPipeError, ConnectionResetError):
+            pass
+
     def do_GET(self):
         path = self.path.split("?")[0]
 
         if path == "/api/log/today":
             self._serve_today_log()
+        elif path == "/api/performance":
+            self._serve_performance_data()
         elif path == "/portfolio.json":
             self._serve_file_from_runtime("portfolio.json")
         else:
@@ -189,6 +206,98 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(data)
+
+    def _serve_performance_data(self):
+        """Return portfolio performance vs SPY benchmark as JSON.
+
+        Reads portfolio_snapshots from SQLite and fetches SPY daily closes
+        from Yahoo Finance. Returns JSON with:
+        {
+            "portfolio": [{"date": "2026-04-22", "value": 978483, "pnl_pct": 0.0}, ...],
+            "benchmark": [{"date": "2026-04-22", "value": 100.0, "pnl_pct": 0.0}, ...],
+            "initial_value": 978483.35
+        }
+
+        Portfolio values are sampled once per day (last snapshot of each day).
+        SPY is normalized to start at 100 on the same date as the first snapshot.
+        """
+        import json
+        import sqlite3
+
+        db_path = os.path.join(_PROJECT_ROOT, "data", "agent.db")
+        if not os.path.isfile(db_path):
+            self.send_error(404, "Database not found")
+            return
+
+        try:
+            conn = sqlite3.connect(db_path)
+            c = conn.cursor()
+
+            # Get daily portfolio values (last snapshot per day)
+            c.execute("""
+                SELECT DATE(snapshot_time) as day,
+                       total_value, total_pnl_pct
+                FROM portfolio_snapshots
+                WHERE id IN (
+                    SELECT MAX(id) FROM portfolio_snapshots
+                    GROUP BY DATE(snapshot_time)
+                )
+                ORDER BY day
+            """)
+            rows = c.fetchall()
+            conn.close()
+
+            if not rows:
+                self._send_json({"portfolio": [], "benchmark": [], "initial_value": 0})
+                return
+
+            initial_value = rows[0][1]
+            portfolio = []
+            for day, value, pnl_pct in rows:
+                pct = ((value - initial_value) / initial_value * 100) if initial_value > 0 else 0
+                portfolio.append({"date": day, "value": round(value, 2), "pnl_pct": round(pct, 2)})
+
+            # Fetch SPY benchmark from Yahoo Finance
+            benchmark = []
+            try:
+                import yfinance as yf
+                start_date = rows[0][0]
+                spy = yf.Ticker("SPY")
+                hist = spy.history(start=start_date, interval="1d")
+                if not hist.empty:
+                    spy_initial = float(hist.iloc[0]["Close"])
+                    for idx, row in hist.iterrows():
+                        day_str = idx.strftime("%Y-%m-%d")
+                        spy_close = float(row["Close"])
+                        spy_pct = ((spy_close - spy_initial) / spy_initial * 100)
+                        benchmark.append({
+                            "date": day_str,
+                            "value": round(spy_close, 2),
+                            "pnl_pct": round(spy_pct, 2),
+                        })
+            except Exception as exc:
+                # Benchmark unavailable — return portfolio only
+                pass
+
+            self._send_json({
+                "portfolio": portfolio,
+                "benchmark": benchmark,
+                "initial_value": round(initial_value, 2),
+            })
+
+        except Exception as exc:
+            self.send_error(500, str(exc))
+
+    def _send_json(self, data):
+        """Send a JSON response."""
+        import json
+        body = json.dumps(data).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(body)
 
     def log_message(self, format, *args):
         """Suppress routine GET logs to keep the console clean."""

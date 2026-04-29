@@ -93,16 +93,28 @@ class TestNoShortSelling:
 class TestTotalExposureLimit:
     """Total position value should not exceed 90% of portfolio."""
 
-    def test_rejects_when_total_exposure_exceeded(self):
+    def test_reduces_quantity_when_near_exposure_limit(self):
         rm = _rm()
-        # Already holding 85% of portfolio in positions
+        # Already holding 75% of portfolio in positions
         rm.update_position("MSFT", 1000, 400.0, 400.0, 380.0)  # $400k
         rm.update_position("GOOGL", 1000, 350.0, 350.0, 332.0)  # $350k
-        # Total: $750k = 75%. New $200k would make 95% > 90% limit
+        # Total: $750k = 75%. Max exposure = 90% = $900k. Available = $150k.
+        # Full position would be $250k (25%) but gets reduced to fit $150k.
         rm._last_trade_time.clear()
         result = rm.evaluate_signal(_signal("AAPL", "BUY", 200.0))
-        # Position size would be min(25%=$250k, cash-buffer) / 200 = ~1250 shares
-        # But 750k + 250k = 1M > 900k (90%) → rejected
+        assert result is not None
+        # Quantity should be reduced: floor(150000 / 200) = 750 shares
+        assert result.quantity == 750
+        assert result.quantity * 200.0 <= 150_000.0
+
+    def test_rejects_when_portfolio_fully_allocated(self):
+        rm = _rm()
+        # Already holding 91% of portfolio — no room at all
+        rm.update_position("MSFT", 1000, 500.0, 500.0, 475.0)  # $500k
+        rm.update_position("GOOGL", 1000, 410.0, 410.0, 389.0)  # $410k
+        # Total: $910k = 91% > 90% limit → rejected
+        rm._last_trade_time.clear()
+        result = rm.evaluate_signal(_signal("AAPL", "BUY", 200.0))
         assert result is None
 
     def test_approves_when_under_exposure_limit(self):

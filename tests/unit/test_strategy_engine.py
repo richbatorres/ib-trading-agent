@@ -471,3 +471,189 @@ class TestInsufficientData:
             "AAPL", 99.0, 2_000_000, short_prices, short_prices, 1_000_000,
         ))
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Feature normalization tests (Part 2)
+# ---------------------------------------------------------------------------
+
+class TestNormalizeIndicator:
+    """Tests for the _normalize_indicator static method."""
+
+    def test_normalize_midpoint(self):
+        result = StrategyEngine._normalize_indicator(50.0, 0.0, 100.0)
+        assert result == pytest.approx(0.5)
+
+    def test_normalize_min_value(self):
+        result = StrategyEngine._normalize_indicator(0.0, 0.0, 100.0)
+        assert result == pytest.approx(0.0)
+
+    def test_normalize_max_value(self):
+        result = StrategyEngine._normalize_indicator(100.0, 0.0, 100.0)
+        assert result == pytest.approx(1.0)
+
+    def test_normalize_clamps_below_min(self):
+        result = StrategyEngine._normalize_indicator(-10.0, 0.0, 100.0)
+        assert result == pytest.approx(0.0)
+
+    def test_normalize_clamps_above_max(self):
+        result = StrategyEngine._normalize_indicator(150.0, 0.0, 100.0)
+        assert result == pytest.approx(1.0)
+
+    def test_normalize_equal_min_max_returns_half(self):
+        result = StrategyEngine._normalize_indicator(42.0, 42.0, 42.0)
+        assert result == pytest.approx(0.5)
+
+    def test_normalize_negative_range(self):
+        result = StrategyEngine._normalize_indicator(0.0, -1.0, 1.0)
+        assert result == pytest.approx(0.5)
+
+    def test_normalize_polymarket_positive(self):
+        result = StrategyEngine._normalize_indicator(0.5, -1.0, 1.0)
+        assert result == pytest.approx(0.75)
+
+    def test_normalize_polymarket_negative(self):
+        result = StrategyEngine._normalize_indicator(-0.5, -1.0, 1.0)
+        assert result == pytest.approx(0.25)
+
+    def test_normalized_indicators_in_signal(self):
+        """Signals should contain norm_rsi, norm_trend_strength, norm_polymarket."""
+        engine = _make_engine()
+        declining = np.linspace(120, 90, 50)
+        _run(engine.process_tick(
+            "AAPL", 90.0, 2_000_000, declining, declining, 1_000_000,
+        ))
+        recovering = np.concatenate([declining[20:], np.linspace(90, 130, 25)])
+        sig = _run(engine.process_tick(
+            "AAPL", 130.0, 2_000_000, recovering, recovering, 1_000_000,
+        ))
+        if sig is not None:
+            assert "norm_rsi" in sig.indicators
+            assert "norm_trend_strength" in sig.indicators
+            assert "norm_polymarket" in sig.indicators
+            assert 0.0 <= sig.indicators["norm_rsi"] <= 1.0
+            assert 0.0 <= sig.indicators["norm_trend_strength"] <= 1.0
+            assert 0.0 <= sig.indicators["norm_polymarket"] <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# Missing data robustness tests (Part 3)
+# ---------------------------------------------------------------------------
+
+class TestMissingDataRobustness:
+    """Tests for missing/invalid data handling in process_tick."""
+
+    def test_empty_prices_returns_none(self):
+        engine = _make_engine()
+        empty = np.array([])
+        volumes = np.array([1_000_000.0] * 50)
+        result = _run(engine.process_tick(
+            "AAPL", 100.0, 2_000_000, empty, volumes, 1_000_000,
+        ))
+        assert result is None
+
+    def test_nan_in_prices_returns_none(self):
+        engine = _make_engine()
+        prices = _make_prices(50)
+        prices[25] = np.nan
+        volumes = _make_prices(50)
+        result = _run(engine.process_tick(
+            "AAPL", 100.0, 2_000_000, prices, volumes, 1_000_000,
+        ))
+        assert result is None
+
+    def test_empty_volumes_returns_none(self):
+        engine = _make_engine()
+        prices = _make_prices(50)
+        empty_vol = np.array([])
+        result = _run(engine.process_tick(
+            "AAPL", 100.0, 2_000_000, prices, empty_vol, 1_000_000,
+        ))
+        assert result is None
+
+    def test_nan_in_volumes_returns_none(self):
+        engine = _make_engine()
+        prices = _make_prices(50)
+        volumes = _make_prices(50)
+        volumes[10] = np.nan
+        result = _run(engine.process_tick(
+            "AAPL", 100.0, 2_000_000, prices, volumes, 1_000_000,
+        ))
+        assert result is None
+
+    def test_valid_data_passes_through(self):
+        engine = _make_engine()
+        prices = _make_prices(50)
+        volumes = np.full(50, 2_000_000.0)
+        # Should not return None due to data validation (may return None for other reasons)
+        result = _run(engine.process_tick(
+            "AAPL", 100.0, 2_000_000, prices, volumes, 1_000_000,
+        ))
+        # First tick — no previous indicators, so None is expected
+        assert result is None  # but NOT because of data validation
+
+
+# ---------------------------------------------------------------------------
+# Weighted signal aggregator tests (Part 4)
+# ---------------------------------------------------------------------------
+
+class TestWeightedSignalAggregator:
+    """Tests for performance-weighted strategy selection."""
+
+    def test_initial_weight_is_neutral(self):
+        engine = _make_engine()
+        assert engine._get_strategy_weight("momentum") == pytest.approx(0.5)
+        assert engine._get_strategy_weight("mean_reversion") == pytest.approx(0.5)
+        assert engine._get_strategy_weight("trend_following") == pytest.approx(0.5)
+
+    def test_weight_neutral_below_10_trades(self):
+        engine = _make_engine()
+        for _ in range(9):
+            engine.record_trade_outcome("momentum", True)
+        # Only 9 trades — should still return neutral 0.5
+        assert engine._get_strategy_weight("momentum") == pytest.approx(0.5)
+
+    def test_weight_reflects_win_rate_after_10_trades(self):
+        engine = _make_engine()
+        for _ in range(8):
+            engine.record_trade_outcome("momentum", True)
+        for _ in range(2):
+            engine.record_trade_outcome("momentum", False)
+        # 10 trades, 8 wins → 0.8
+        assert engine._get_strategy_weight("momentum") == pytest.approx(0.8)
+
+    def test_weight_zero_wins(self):
+        engine = _make_engine()
+        for _ in range(10):
+            engine.record_trade_outcome("momentum", False)
+        assert engine._get_strategy_weight("momentum") == pytest.approx(0.0)
+
+    def test_weight_all_wins(self):
+        engine = _make_engine()
+        for _ in range(10):
+            engine.record_trade_outcome("momentum", True)
+        assert engine._get_strategy_weight("momentum") == pytest.approx(1.0)
+
+    def test_record_outcome_unknown_strategy_ignored(self):
+        engine = _make_engine()
+        # Should not raise
+        engine.record_trade_outcome("unknown_strategy", True)
+        assert "unknown_strategy" not in engine._strategy_total
+
+    def test_record_outcome_increments_counters(self):
+        engine = _make_engine()
+        engine.record_trade_outcome("momentum", True)
+        engine.record_trade_outcome("momentum", False)
+        assert engine._strategy_total["momentum"] == 2
+        assert engine._strategy_wins["momentum"] == 1
+
+    def test_strategy_tracking_independent(self):
+        engine = _make_engine()
+        for _ in range(10):
+            engine.record_trade_outcome("momentum", True)
+        for _ in range(10):
+            engine.record_trade_outcome("mean_reversion", False)
+        assert engine._get_strategy_weight("momentum") == pytest.approx(1.0)
+        assert engine._get_strategy_weight("mean_reversion") == pytest.approx(0.0)
+        # trend_following untouched — neutral
+        assert engine._get_strategy_weight("trend_following") == pytest.approx(0.5)

@@ -555,3 +555,75 @@ Build an autonomous AI trading agent for Interactive Brokers from scratch. The i
     - **Files changed:** `src/agent.py` (`_read_portfolio_from_ib()`, `_export_portfolio_json()`), `agent.py` (reconnect logic)
     - **Verified:** Agent immediately executed BUY 1040 TXN @ $235.14 after restart
     - _Requirements: 12.1, 12.2_
+
+- [x] 28. Strategy & infrastructure improvements — April 23, 2026
+  - [x] 28.1 Add new technical indicators (ATR, VWAP, trend strength, volume spike)
+    - All NumPy vectorized, appended to existing `src/strategies/indicators.py`
+    - ATR uses Wilder's smoothing, VWAP uses cumulative sums, trend strength is ADX-like (0-100)
+    - _Requirements: 24.3_
+  - [x] 28.2 Add volatility-adjusted position sizing
+    - `calculate_volatility_adjusted_size()` in RiskManager: 1% risk per trade via ATR
+    - `evaluate_signal()` auto-selects ATR sizing when available
+    - _Requirements: 12.1, 12.2_
+  - [x] 28.3 Add circuit breaker for flash crash protection
+    - `check_circuit_breaker()` in RiskManager: blocks >10% single-tick moves
+    - Integrated into `_process_tick_async()` before strategy evaluation
+    - _Requirements: 9.1_
+  - [x] 28.4 Add trend strength filter to strategies
+    - Momentum and trend following: weak trend (<20) → confidence ×0.70, strong trend (>40) → ×1.10
+    - Trend strength included in signal indicators dict
+    - _Requirements: 4.3, 6.2_
+  - [x] 28.5 Add multi-exchange session manager
+    - ExchangeSession dataclass, EXCHANGE_SESSIONS registry (US, EU, ASIA, US_PREMARKET, US_AFTERHOURS)
+    - `get_active_sessions()`, `is_session_active()`, `get_session_for_symbol()`
+    - TRADING_SESSIONS config in .env, session logging in agent initialization
+    - 42 unit tests in tests/unit/test_exchange_sessions.py
+    - _Requirements: 3.1, 3.2_
+  - [x] 28.6 Test verification
+    - 156 tests passed, 0 failed across all modified modules
+    - New tests: 42 (exchange sessions)
+    - Existing tests: 114 (indicators, strategy, risk, market hours) — all pass unchanged
+  - [x] 28.7 Enable multi-exchange trading (US + EU + ASIA)
+    - `_make_contract()` helper routes .L→LSE/GBP, .T→TSE/JPY, default→SMART/USD
+    - MarketScreener extended with `get_ftse100_symbols()`, `get_nikkei225_symbols()`, `screen_for_session()`
+    - Agent screens all configured sessions, portfolio checks run during any active session
+    - Dashboard shows active/configured sessions with visual indicators
+    - .env updated to TRADING_SESSIONS=US,EU,ASIA (76 symbols total)
+    - OrderExecutor uses LimitOrder with TIF=IOC for non-US exchanges (LSE/TSE reject plain MarketOrders)
+    - _Requirements: 3.1, 3.2_
+  - [x] 28.8 Dynamic position sizing near exposure limit
+    - RiskManager now reduces quantity to fit within remaining exposure instead of rejecting outright
+    - Same for cash buffer: reduces quantity to preserve minimum cash reserve
+    - Only rejects when portfolio is fully allocated (>90%) or no cash above buffer
+    - Fixes issue where 597/606 signals were rejected due to rigid exposure check
+    - _Requirements: 12.1, 12.2_
+  - [x] 28.9 Tick size rounding for non-US exchanges
+    - `_round_to_tick()` rounds limit prices to exchange-specific tick increments
+    - LSE: 5p for prices >1000p, 1p for 500-1000p, 0.5p for 50-500p
+    - TSE: 5¥ for prices >5000, 1¥ for 3000-5000, 0.5¥ for 1000-3000
+    - Fixes IB error 110 "price does not conform to minimum price variation"
+    - _Requirements: 10.1_
+  - [x] 28.10 Fix IB reconnection with random clientId
+    - Root cause: fixed clientId=77 caused "clientId already in use" after ungraceful disconnect
+    - Fix: `_generate_client_id()` creates random ID (1-999) on each startup and reconnect
+    - Disconnect stale connection before reconnecting, wire events only once
+    - Main loop no longer competes with ConnectionManager for reconnection
+    - Added `start_agent.bat` and `stop_agent.bat` for running outside Kiro IDE
+    - _Requirements: 1.2, 1.3_
+  - [x] 28.11 Performance comparison chart on dashboard
+    - `/api/performance` endpoint reads portfolio_snapshots from SQLite (daily last snapshot)
+    - Fetches SPY benchmark from Yahoo Finance for S&P 500 comparison
+    - Chart.js line chart shows Portfolio (red) vs S&P 500 (blue dashed) percentage returns
+    - Period selector: 7/14/30/90 days and All Time with client-side filtering
+    - Status bar shows portfolio %, S&P 500 %, and alpha (outperformance)
+    - Fixed-height container (220px) prevents chart from expanding
+    - Auto-refreshes every 5 minutes
+    - _Requirements: 18.1, 21.1_
+  - [x] 28.12 Polymarket sentiment audit and fix
+    - **Finding:** Polymarket API returns mostly sports/entertainment markets, not financial
+    - 0/100 markets were financially relevant → sentiment always 0.0000
+    - **Fix:** Added skip filter for sports (NHL/NBA/FIFA/etc), entertainment, and political nomination markets
+    - Expanded bearish keywords (invade, crisis, collapse, etc) and bullish keywords (ceasefire, deal, bitcoin, etc)
+    - Sentiment now correctly filters non-financial noise
+    - **Conclusion:** Polymarket has limited financial market coverage; sentiment will be 0.0 when no relevant markets exist (by design — secondary factor only)
+    - _Requirements: 13.1, 13.2, 13.3_

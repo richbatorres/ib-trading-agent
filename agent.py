@@ -122,23 +122,21 @@ async def _run_agent_loop(config: AgentConfig) -> None:
                             ib.sleep(10)
                         else:
                             # IB disconnected — keep polling Yahoo, wait for reconnect
+                            # ConnectionManager._on_disconnected handles reconnection
+                            # automatically. We just poll Yahoo and wait.
                             logger.warning("IB disconnected — collecting Yahoo data, waiting for Gateway...")
                             if yahoo:
                                 yahoo.poll()
-                            _time.sleep(10)
+                            _time.sleep(15)
 
-                            # Try to reconnect
-                            try:
-                                await agent._connection_manager.connect()
+                            # Check if ConnectionManager reconnected us
+                            if ib.isConnected():
                                 ib.sleep(2)  # sync account data
-                                # Re-initialize portfolio using the proper method
                                 total_value, cash = agent._read_portfolio_from_ib()
                                 if total_value > 0:
                                     agent._risk_manager.update_portfolio(total_value, cash)
                                     logger.info("Portfolio re-initialized after reconnect: value=%.2f, cash=%.2f", total_value, cash)
                                 logger.info("IB Gateway reconnected!")
-                            except Exception as exc:
-                                logger.debug("Reconnect attempt failed: %s", exc)
 
                     except (KeyboardInterrupt, SystemExit):
                         raise
@@ -169,11 +167,27 @@ def cmd_start(_args: argparse.Namespace) -> None:
     existing_pid = _read_pid_file()
     if existing_pid is not None:
         # Check if the process is actually running
+        # On Windows, os.kill(pid, 0) is unreliable — use psutil-like check
+        process_alive = False
         try:
             os.kill(existing_pid, 0)
+            # On Windows, os.kill(pid, 0) may succeed for dead PIDs.
+            # Double-check by verifying the process is a Python process.
+            import subprocess as _sp
+            result = _sp.run(
+                ["tasklist", "/FI", f"PID eq {existing_pid}", "/NH"],
+                capture_output=True, text=True, timeout=5,
+            )
+            process_alive = str(existing_pid) in result.stdout
+        except (OSError, PermissionError):
+            process_alive = False
+        except Exception:
+            process_alive = False
+
+        if process_alive:
             print(f"Agent is already running (PID {existing_pid})")
             sys.exit(1)
-        except OSError:
+        else:
             # Stale PID file — process is gone
             _remove_pid_file()
 

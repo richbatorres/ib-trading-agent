@@ -18,6 +18,24 @@ logger = logging.getLogger(__name__)
 _MAX_HISTORY_LEN = 100
 
 
+def _make_contract(symbol: str) -> Stock:
+    """Create an IB Stock contract with exchange/currency based on symbol suffix.
+    
+    - Symbols ending in .L → LSE exchange, GBP currency (London)
+    - Symbols ending in .T → TSE exchange, JPY currency (Tokyo)
+    - All others → SMART exchange, USD currency (US)
+    """
+    upper = symbol.upper()
+    if upper.endswith(".L"):
+        # London Stock Exchange — strip suffix for IB
+        return Stock(symbol.replace(".L", "").replace(".l", ""), "LSE", "GBP")
+    elif upper.endswith(".T"):
+        # Tokyo Stock Exchange — strip suffix for IB
+        return Stock(symbol.replace(".T", "").replace(".t", ""), "TSE", "JPY")
+    else:
+        return Stock(symbol, "SMART", "USD")
+
+
 class MarketDataService:
     """Streams and processes real-time market data from IB.
 
@@ -57,7 +75,7 @@ class MarketDataService:
             logger.info("Market data type: yahoo — skipping IB market data subscriptions")
             # Still qualify contracts for order execution
             for symbol in self._watchlist:
-                contract = Stock(symbol, "SMART", "USD")
+                contract = _make_contract(symbol)
                 qualified = await self._ib.qualifyContractsAsync(contract)
                 if qualified:
                     self._contracts[symbol] = qualified[0]
@@ -71,7 +89,7 @@ class MarketDataService:
         logger.info("Market data type set to %d", mdt_int)
 
         for symbol in self._watchlist:
-            contract = Stock(symbol, "SMART", "USD")
+            contract = _make_contract(symbol)
             qualified = await self._ib.qualifyContractsAsync(contract)
             if not qualified:
                 logger.warning("Failed to qualify contract for %s — skipping", symbol)

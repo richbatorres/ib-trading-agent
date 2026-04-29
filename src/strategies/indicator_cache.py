@@ -22,7 +22,7 @@ _DEFAULT_WINDOW_SIZE = 100
 _PRICE_DEPENDENT_INDICATORS = frozenset({
     "rsi", "macd_histogram", "macd_line", "macd_signal",
     "bb_upper", "bb_middle", "bb_lower",
-    "ema_9", "ema_21",
+    "ema_9", "ema_21", "trend_strength",
 })
 
 # Indicator names that depend on volume data

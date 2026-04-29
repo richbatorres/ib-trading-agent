@@ -10,7 +10,7 @@ Requirements: 1.1, 2.1, 2.3, 3.3, 3.4, 4.1, 13.1, 14.4, 18.1, 23.1, 23.2, 23.4, 
 import asyncio
 import logging
 from datetime import datetime
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import nest_asyncio
 import numpy as np
@@ -62,6 +62,7 @@ class TradingAgent:
         self._initialized = False
         self._scheduler: Optional[AsyncIOScheduler] = None
         self._latency_samples: list = []  # signal-to-order latency in ms
+        self._prev_prices: Dict[str, float] = {}  # previous tick prices for circuit breaker
 
         # Core services — initialized in constructor with dependency injection
         self._connection_manager = ConnectionManager(config)
@@ -81,6 +82,9 @@ class TradingAgent:
             earnings_blackout_symbols=set(),
             market_data_type=config.market_data_type,
         )
+        # Wire configured trading sessions for multi-market support
+        configured_sessions = [s.strip() for s in config.trading_sessions.split(",")]
+        self._strategy_engine._configured_sessions = configured_sessions
 
         # Risk management
         self._risk_manager = RiskManager(config, self._state_manager, ib)
@@ -187,6 +191,15 @@ class TradingAgent:
         await self._market_hours.update_schedule()
         logger.info("Market hours schedule updated")
 
+        # e0. Log configured trading sessions
+        configured_sessions = [s.strip() for s in self._config.trading_sessions.split(",")]
+        logger.info("Configured trading sessions: %s", configured_sessions)
+        active = self._market_hours.get_active_sessions()
+        if active:
+            logger.info("Currently active sessions: %s", active)
+        else:
+            logger.info("No exchange sessions currently active")
+
         # e1. Initialize portfolio from IB account values
         total_value, cash = self._read_portfolio_from_ib()
         if total_value > 0:
@@ -199,16 +212,27 @@ class TradingAgent:
             logger.warning("Could not load portfolio from IB — setting default 1M")
             self._risk_manager.update_portfolio(1_000_000.0, 1_000_000.0)
 
-        # e2. Run market screener to select today's candidates
-        logger.info("Running market screener...")
-        try:
-            candidates = self._screener.screen()
-            if not candidates:
-                candidates = _FALLBACK_WATCHLIST
-                logger.warning("Screener returned no candidates — using fallback")
-        except Exception as exc:
-            logger.warning("Screener failed: %s — using fallback", exc)
+        # e2. Run market screener for all configured sessions
+        configured_sessions = [s.strip() for s in self._config.trading_sessions.split(",")]
+        candidates = []
+        for session in configured_sessions:
+            # Only screen main sessions (not pre-market/after-hours which use same symbols)
+            if session in ("US_PREMARKET", "US_AFTERHOURS"):
+                continue
+            logger.info("Running market screener for %s session...", session)
+            try:
+                session_candidates = self._screener.screen_for_session(session)
+                if session_candidates:
+                    candidates.extend(session_candidates)
+                    logger.info("%s screener: %d candidates", session, len(session_candidates))
+                else:
+                    logger.warning("%s screener returned no candidates", session)
+            except Exception as exc:
+                logger.warning("%s screener failed: %s", session, exc)
+        
+        if not candidates:
             candidates = _FALLBACK_WATCHLIST
+            logger.warning("All screeners failed — using fallback watchlist")
 
         # e3. Build filtered watchlist and check earnings blackout
         watchlist = await self._watchlist_manager.build_watchlist(candidates)
@@ -387,6 +411,18 @@ class TradingAgent:
 
         tick_start = _time.perf_counter()
         try:
+            # 0. Circuit breaker — block anomalous price movements
+            prev_price = self._prev_prices.get(symbol)
+            self._prev_prices[symbol] = price
+            if prev_price is not None and self._risk_manager.check_circuit_breaker(
+                symbol, price, prev_price
+            ):
+                logger.warning(
+                    "Tick skipped for %s: circuit breaker triggered (%.2f → %.2f)",
+                    symbol, prev_price, price,
+                )
+                return
+
             # 1. Generate signal from strategy engine
             signal = await self._strategy_engine.process_tick(
                 symbol=symbol,
@@ -530,8 +566,11 @@ class TradingAgent:
         self._scheduler.start()
 
     async def _check_portfolio_loss(self) -> None:
-        """Check portfolio loss — only during market hours."""
-        if not self._market_hours.is_market_open():
+        """Check portfolio loss — during any active configured session."""
+        # Check if any configured session is active
+        configured = [s.strip() for s in self._config.trading_sessions.split(",")]
+        any_active = any(self._market_hours.is_session_active(s) for s in configured)
+        if not any_active and not self._market_hours.is_market_open():
             return
 
         # Update portfolio values from IB before checking
@@ -542,8 +581,10 @@ class TradingAgent:
         await self._risk_manager.check_portfolio_loss()
 
     async def _take_portfolio_snapshot(self) -> None:
-        """Take a portfolio snapshot — only during market hours."""
-        if not self._market_hours.is_market_open():
+        """Take a portfolio snapshot — during any active configured session."""
+        configured = [s.strip() for s in self._config.trading_sessions.split(",")]
+        any_active = any(self._market_hours.is_session_active(s) for s in configured)
+        if not any_active and not self._market_hours.is_market_open():
             return
 
         total_value, cash = self._read_portfolio_from_ib()
@@ -636,6 +677,8 @@ class TradingAgent:
                 "fillsToday": fills_today,
                 "hardStopActive": self._risk_manager.is_hard_stop_active,
                 "openPositionCount": len(positions),
+                "activeSessions": self._market_hours.get_active_sessions(),
+                "configuredSessions": [s.strip() for s in self._config.trading_sessions.split(",")],
             }
 
             with open("logs/portfolio.json", "w") as f:
@@ -693,7 +736,17 @@ class TradingAgent:
         """
         logger.info("Running daily market screening...")
         try:
-            candidates = self._screener.screen()
+            configured_sessions = [s.strip() for s in self._config.trading_sessions.split(",")]
+            candidates = []
+            for session in configured_sessions:
+                if session in ("US_PREMARKET", "US_AFTERHOURS"):
+                    continue
+                try:
+                    session_candidates = self._screener.screen_for_session(session)
+                    if session_candidates:
+                        candidates.extend(session_candidates)
+                except Exception:
+                    pass
             if candidates:
                 self._market_data._watchlist = candidates
                 logger.info("Watchlist updated: %d candidates for today", len(candidates))

@@ -11,6 +11,8 @@ from typing import List, Optional, Set
 
 from ib_insync import IB, Stock
 
+from src.services.market_data_service import _make_contract
+
 logger = logging.getLogger(__name__)
 
 
@@ -56,7 +58,7 @@ class WatchlistManager:
         accepted: List[str] = []
 
         for symbol in candidates:
-            contract = Stock(symbol, "SMART", "USD")
+            contract = _make_contract(symbol)
             try:
                 qualified = await self._ib.qualifyContractsAsync(contract)
             except Exception:

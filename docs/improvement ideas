@@ -1,0 +1,4 @@
+- u dashboard dodati linijski graf koji uspoređuje performanse agentovog računa s kretanjem tržišta (primjerice S&P500 ili slični)
+- kao iskusni broker analizirati trade performanse iz logova (fokusirati se samo na log poruke) i složiti plan improvement strategije, ukoliko je potrebno (kada generirati buy/sell signale, treba li više ili manje uzimati u obzir eksterne podatke poput inputa s polymarketa, itd.)
+- provjeriti da li skupljanje inputa s polymarketa ispravno radi i utječu li ti podatci na generiranje tradeova?
+- ako je moguće delegiraj taskove subagentu, ali provjeri njegov rad na kraju. Je li odradio sve što je trebao i radi li sve ispravno nakon ispunjenja taskova

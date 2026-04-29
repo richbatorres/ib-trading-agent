@@ -20,6 +20,10 @@ The system is built on Python's `asyncio` event loop. The `ib_insync` library pr
 10. **Crash-resilient main loop** — Agent never exits on its own. Survives IB Gateway crashes, internet outages, and any exception. Reconnects automatically. Only SIGTERM/KeyboardInterrupt can stop it.
 11. **RiskManager v2 safety checks** — No short selling, no duplicate positions per symbol, max 90% total portfolio exposure (no margin), 60-second cooldown between trades on same symbol, position tracking after every trade.
 12. **AvailableFunds for cash reading** — `_read_portfolio_from_ib()` uses IB's `AvailableFunds` tag instead of `TotalCashBalance` for the cash component. On margin accounts (including paper trading), `TotalCashBalance` is negative, which breaks position sizing. Fallback chain: `AvailableFunds` → `BuyingPower × 0.25` → `NetLiquidation − GrossPositionValue` → `NetLiquidation × 0.10`.
+13. **Multi-exchange session manager** — `MarketHoursService` extended with `ExchangeSession` dataclass and `EXCHANGE_SESSIONS` registry supporting US (NYSE/NASDAQ 9:30-16:00 ET), EU (LSE/Eurex 8:00-16:30 GMT), ASIA (TSE 9:00-15:00 JST), US pre-market (4:00-9:30 ET), and US after-hours (16:00-20:00 ET). Configurable via `TRADING_SESSIONS` in `.env`. `_make_contract(symbol)` helper in `market_data_service.py` routes exchange and currency by suffix: `.L`→LSE/GBP, `.T`→TSE/JPY, default→SMART/USD — used by MarketDataService, OrderExecutor, and WatchlistManager. Multi-exchange screener in `market_screener.py` provides `get_ftse100_symbols()` (FTSE 100 from Wikipedia, fallback to top 30), `get_nikkei225_symbols()` (curated top 20), and `screen_for_session()` routing US/EU/ASIA to appropriate symbol lists. Agent screens all configured sessions, portfolio snapshots and loss checks run when any configured session is active. Dashboard JSON includes `activeSessions` and `configuredSessions`. Total: 76 symbols (30 US + 26 EU + 20 ASIA).
+14. **Enhanced feature engineering** — Added ATR (volatility), VWAP, trend strength (ADX-like, 0-100), and volume spike detection to the indicator library. All NumPy vectorized. Trend strength filter adjusts momentum and trend following confidence: weak trend (<20) reduces by 30%, strong trend (>40) boosts by 10%.
+15. **Volatility-adjusted position sizing** — ATR-based position sizing risks 1% of portfolio per trade (shares = risk_amount / (2×ATR)), capped by existing position size and cash buffer limits. Falls back to fixed sizing when ATR unavailable.
+16. **Circuit breaker** — Flash crash protection blocks trades when price moves >10% in a single tick. Integrated into tick processing pipeline before strategy evaluation.
 
 ## Architecture
 
@@ -1078,3 +1082,25 @@ tests/
    - BUY: Price < lower BB AND RSI < 40 (new RSI confirmation)
    - SELL: Price > upper BB AND RSI > 60 (new RSI confirmation)
    - Base confidence: 0.65 (was: 0.60)
+
+## Strategy & Infrastructure Improvements (April 2026)
+
+### New Indicators
+- **ATR** (Average True Range): Wilder's smoothing, 14-period default. Used for volatility-adjusted position sizing.
+- **VWAP** (Volume-Weighted Average Price): Cumulative sum approach.
+- **Trend Strength**: ADX-like indicator (0-100). >25 = trending, <25 = ranging. Used as confidence filter.
+- **Volume Spike**: Boolean detection when volume > 2× 20-day average.
+
+### Strategy Enhancements
+- **Trend filter**: Momentum and trend following strategies adjust confidence based on trend strength. Weak trend (<20) → ×0.70, strong trend (>40) → ×1.10.
+- **Volatility-adjusted sizing**: ATR-based position sizing (1% risk per trade). Falls back to fixed sizing when ATR unavailable.
+
+### Risk Management Enhancements
+- **Circuit breaker**: Blocks trades when price moves >10% in a single tick (flash crash protection).
+- **ATR-aware sizing**: `evaluate_signal()` automatically uses volatility-adjusted sizing when ATR is in the signal indicators.
+
+### Multi-Exchange Session Manager
+- **ExchangeSession** dataclass with 5 pre-defined sessions: US, EU, ASIA, US_PREMARKET, US_AFTERHOURS.
+- **Session-aware methods**: `get_active_sessions()`, `is_session_active()`, `get_session_for_symbol()`.
+- **Configuration**: `TRADING_SESSIONS` in `.env` (comma-separated, default "US").
+- **Symbol routing**: Suffix heuristic (.L→EU, .T→ASIA, default→US).

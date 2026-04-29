@@ -4,10 +4,14 @@ Determines whether the market is open using exchange calendar data from IB
 (via reqContractDetails for a reference contract). Falls back to default
 NYSE hours (9:30-16:00 ET) when IB is unavailable.
 
+Also provides multi-exchange session awareness for US, EU, and ASIA
+sessions (including US pre-market and after-hours).
+
 Requirements: 3.1, 3.2, 3.3, 3.4
 """
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -22,6 +26,68 @@ _DEFAULT_CLOSE = time(16, 0)
 
 # Eastern Time zone
 _ET = ZoneInfo("America/New_York")
+
+
+# ------------------------------------------------------------------
+# Multi-exchange session definitions
+# ------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ExchangeSession:
+    """Defines a trading session for an exchange."""
+
+    name: str  # e.g. "US", "EU", "ASIA"
+    exchange: str  # e.g. "NYSE", "LSE", "TSE"
+    timezone: str  # e.g. "America/New_York", "Europe/London", "Asia/Tokyo"
+    open_time: time  # local open time
+    close_time: time  # local close time
+    reference_symbol: str  # IB contract for schedule lookup, e.g. "SPY", "VOD", "7203"
+
+
+# Pre-defined exchange sessions
+EXCHANGE_SESSIONS = {
+    "US": ExchangeSession(
+        name="US",
+        exchange="NYSE/NASDAQ",
+        timezone="America/New_York",
+        open_time=time(9, 30),
+        close_time=time(16, 0),
+        reference_symbol="SPY",
+    ),
+    "EU": ExchangeSession(
+        name="EU",
+        exchange="LSE/Eurex",
+        timezone="Europe/London",
+        open_time=time(8, 0),
+        close_time=time(16, 30),
+        reference_symbol="VOD",
+    ),
+    "ASIA": ExchangeSession(
+        name="ASIA",
+        exchange="TSE",
+        timezone="Asia/Tokyo",
+        open_time=time(9, 0),
+        close_time=time(15, 0),
+        reference_symbol="7203",
+    ),
+    "US_PREMARKET": ExchangeSession(
+        name="US_PREMARKET",
+        exchange="NYSE/NASDAQ",
+        timezone="America/New_York",
+        open_time=time(4, 0),
+        close_time=time(9, 30),
+        reference_symbol="SPY",
+    ),
+    "US_AFTERHOURS": ExchangeSession(
+        name="US_AFTERHOURS",
+        exchange="NYSE/NASDAQ",
+        timezone="America/New_York",
+        open_time=time(16, 0),
+        close_time=time(20, 0),
+        reference_symbol="SPY",
+    ),
+}
 
 
 class MarketHoursService:
@@ -111,6 +177,84 @@ class MarketHoursService:
 
         # Move to next weekday
         return self._next_weekday_close(now, close_time)
+
+    def get_active_sessions(self) -> list[str]:
+        """Return names of all currently active exchange sessions.
+
+        Checks each session in EXCHANGE_SESSIONS against current time
+        in that session's timezone. Returns list of active session names.
+        Only considers weekdays (Mon–Fri) in each session's timezone.
+        """
+        active: list[str] = []
+        for name, session in EXCHANGE_SESSIONS.items():
+            if self._is_session_active_now(session):
+                active.append(name)
+        return active
+
+    def is_session_active(self, session_name: str) -> bool:
+        """Check if a specific exchange session is currently active.
+
+        Parameters
+        ----------
+        session_name : str
+            Session name from EXCHANGE_SESSIONS (e.g. "US", "EU", "ASIA").
+
+        Returns
+        -------
+        bool
+            True if the session is currently within trading hours.
+            False if the session name is unknown or outside trading hours.
+        """
+        session = EXCHANGE_SESSIONS.get(session_name)
+        if session is None:
+            logger.warning("Unknown session name: %s", session_name)
+            return False
+        return self._is_session_active_now(session)
+
+    def get_session_for_symbol(self, symbol: str) -> Optional[str]:
+        """Determine which session a symbol belongs to based on exchange.
+
+        Simple heuristic:
+        - Symbols ending in .L → EU (London)
+        - Symbols ending in .T → ASIA (Tokyo)
+        - All others → US (default)
+
+        Parameters
+        ----------
+        symbol : str
+            Ticker symbol (e.g. "AAPL", "VOD.L", "7203.T").
+
+        Returns
+        -------
+        Optional[str]
+            Session name ("US", "EU", "ASIA") or None if no match.
+        """
+        if not symbol:
+            return None
+        upper = symbol.upper()
+        if upper.endswith(".L"):
+            return "EU"
+        if upper.endswith(".T"):
+            return "ASIA"
+        return "US"
+
+    # ------------------------------------------------------------------
+    # Internal: session helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _is_session_active_now(session: ExchangeSession) -> bool:
+        """Check if the given session is active right now.
+
+        Considers the session's local timezone and only returns True
+        on weekdays (Mon–Fri).
+        """
+        tz = ZoneInfo(session.timezone)
+        now = datetime.now(tz)
+        if now.weekday() >= 5:  # Saturday or Sunday
+            return False
+        current_time = now.time()
+        return session.open_time <= current_time < session.close_time
 
     # ------------------------------------------------------------------
     # Internal: IB schedule fetching

@@ -364,3 +364,259 @@ class TestCancelAllPending:
 
         # Both orders should have been attempted
         assert mock_ib.cancelOrder.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Order queue tests
+# ---------------------------------------------------------------------------
+
+
+class TestOrderQueue:
+    """Tests for order queuing when at max concurrent orders."""
+
+    @pytest.mark.asyncio
+    async def test_queues_order_when_at_max_concurrent(self):
+        executor, mock_ib, _, _ = _make_executor()
+        ib_trade = _make_ib_trade_mock()
+        mock_ib.placeOrder.return_value = ib_trade
+
+        # Fill up active orders to max (5)
+        for i in range(5):
+            trade = _make_approved_trade(symbol=f"SYM{i}")
+            ib_mock = _make_ib_trade_mock(order_id=i + 1)
+            mock_ib.placeOrder.return_value = ib_mock
+            await executor.execute_trade(trade)
+
+        assert len(executor._active_orders) == 5
+
+        # Next order should be queued
+        queued_trade = _make_approved_trade(symbol="QUEUED")
+        result = await executor.execute_trade(queued_trade)
+
+        assert result is None
+        assert len(executor._pending_orders) == 1
+        assert executor._pending_orders[0].signal.symbol == "QUEUED"
+
+    @pytest.mark.asyncio
+    async def test_immediate_execution_when_below_max(self):
+        executor, mock_ib, _, _ = _make_executor()
+        ib_trade = _make_ib_trade_mock(order_id=1)
+        mock_ib.placeOrder.return_value = ib_trade
+
+        trade = _make_approved_trade()
+        result = await executor.execute_trade(trade)
+
+        assert result is ib_trade
+        assert len(executor._pending_orders) == 0
+        assert 1 in executor._active_orders
+
+    @pytest.mark.asyncio
+    async def test_process_queue_executes_pending(self):
+        executor, mock_ib, _, _ = _make_executor()
+
+        # Manually add a pending order
+        pending_trade = _make_approved_trade(symbol="PEND")
+        executor._pending_orders.append(pending_trade)
+
+        ib_trade = _make_ib_trade_mock(order_id=10)
+        mock_ib.placeOrder.return_value = ib_trade
+
+        await executor._process_queue()
+
+        assert len(executor._pending_orders) == 0
+        mock_ib.placeOrder.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_process_queue_respects_max_concurrent(self):
+        executor, mock_ib, _, _ = _make_executor()
+
+        # Fill active orders to max
+        for i in range(5):
+            executor._active_orders[i] = _make_approved_trade(symbol=f"ACT{i}")
+
+        # Add pending orders
+        executor._pending_orders.append(_make_approved_trade(symbol="P1"))
+        executor._pending_orders.append(_make_approved_trade(symbol="P2"))
+
+        await executor._process_queue()
+
+        # Nothing should have been processed — still at max
+        assert len(executor._pending_orders) == 2
+        mock_ib.placeOrder.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Retry logic tests
+# ---------------------------------------------------------------------------
+
+
+class TestRetryLogic:
+    """Tests for order placement retry logic."""
+
+    @pytest.mark.asyncio
+    async def test_retries_on_failure_then_succeeds(self):
+        executor, mock_ib, _, _ = _make_executor()
+        ib_trade = _make_ib_trade_mock(order_id=1)
+
+        # Fail twice, succeed on third attempt
+        mock_ib.placeOrder.side_effect = [
+            Exception("Connection lost"),
+            Exception("Timeout"),
+            ib_trade,
+        ]
+
+        trade = _make_approved_trade()
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            result = await executor.execute_trade(trade)
+
+        assert result is ib_trade
+        assert mock_ib.placeOrder.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_returns_none_after_all_retries_exhausted(self):
+        executor, mock_ib, _, _ = _make_executor()
+
+        # All 3 attempts fail
+        mock_ib.placeOrder.side_effect = Exception("Persistent failure")
+
+        trade = _make_approved_trade()
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            result = await executor.execute_trade(trade)
+
+        assert result is None
+        assert mock_ib.placeOrder.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_no_retry_delay_after_last_attempt(self):
+        executor, mock_ib, _, _ = _make_executor()
+        mock_ib.placeOrder.side_effect = Exception("Always fails")
+
+        trade = _make_approved_trade()
+        mock_sleep = AsyncMock()
+        with patch("asyncio.sleep", mock_sleep):
+            await executor.execute_trade(trade)
+
+        # Should sleep between attempts 1→2 and 2→3, but NOT after attempt 3
+        assert mock_sleep.call_count == 2
+        mock_sleep.assert_called_with(2.0)
+
+    @pytest.mark.asyncio
+    async def test_successful_first_attempt_no_retry(self):
+        executor, mock_ib, _, _ = _make_executor()
+        ib_trade = _make_ib_trade_mock(order_id=1)
+        mock_ib.placeOrder.return_value = ib_trade
+
+        trade = _make_approved_trade()
+        mock_sleep = AsyncMock()
+        with patch("asyncio.sleep", mock_sleep):
+            result = await executor.execute_trade(trade)
+
+        assert result is ib_trade
+        assert mock_ib.placeOrder.call_count == 1
+        mock_sleep.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Partial fill detection tests
+# ---------------------------------------------------------------------------
+
+
+class TestPartialFillDetection:
+    """Tests for partial fill detection in _on_order_status."""
+
+    def test_partial_fill_logged(self, caplog):
+        executor, _, _, _ = _make_executor()
+
+        trade_mock = MagicMock()
+        trade_mock.contract.symbol = "AAPL"
+        trade_mock.order.orderId = 50
+        trade_mock.orderStatus.status = "Filled"
+        trade_mock.orderStatus.filled = 60
+        trade_mock.orderStatus.remaining = 40
+
+        import logging
+
+        with caplog.at_level(logging.INFO):
+            executor._on_order_status(trade_mock)
+
+        assert "Partial fill detected" in caplog.text
+        assert "60" in caplog.text
+        assert "40" in caplog.text
+
+    def test_full_fill_no_partial_log(self, caplog):
+        executor, _, _, _ = _make_executor()
+
+        trade_mock = MagicMock()
+        trade_mock.contract.symbol = "AAPL"
+        trade_mock.order.orderId = 51
+        trade_mock.orderStatus.status = "Filled"
+        trade_mock.orderStatus.filled = 100
+        trade_mock.orderStatus.remaining = 0
+
+        import logging
+
+        with caplog.at_level(logging.INFO):
+            executor._on_order_status(trade_mock)
+
+        assert "Partial fill detected" not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Active order tracking tests
+# ---------------------------------------------------------------------------
+
+
+class TestActiveOrderTracking:
+    """Tests for active order tracking and removal on completion."""
+
+    def test_completed_order_removed_from_active(self):
+        executor, _, _, _ = _make_executor()
+
+        # Manually add an active order
+        trade = _make_approved_trade()
+        executor._active_orders[42] = trade
+
+        trade_mock = MagicMock()
+        trade_mock.contract.symbol = "AAPL"
+        trade_mock.order.orderId = 42
+        trade_mock.orderStatus.status = "Filled"
+        trade_mock.orderStatus.filled = 100
+        trade_mock.orderStatus.remaining = 0
+
+        executor._on_order_status(trade_mock)
+
+        assert 42 not in executor._active_orders
+
+    def test_cancelled_order_removed_from_active(self):
+        executor, _, _, _ = _make_executor()
+
+        trade = _make_approved_trade()
+        executor._active_orders[43] = trade
+
+        trade_mock = MagicMock()
+        trade_mock.contract.symbol = "AAPL"
+        trade_mock.order.orderId = 43
+        trade_mock.orderStatus.status = "Cancelled"
+        trade_mock.orderStatus.filled = 0
+        trade_mock.orderStatus.remaining = 100
+
+        executor._on_order_status(trade_mock)
+
+        assert 43 not in executor._active_orders
+
+    def test_pending_status_does_not_remove_active(self):
+        executor, _, _, _ = _make_executor()
+
+        trade = _make_approved_trade()
+        executor._active_orders[44] = trade
+
+        trade_mock = MagicMock()
+        trade_mock.contract.symbol = "AAPL"
+        trade_mock.order.orderId = 44
+        trade_mock.orderStatus.status = "Submitted"
+        trade_mock.orderStatus.filled = 0
+        trade_mock.orderStatus.remaining = 100
+
+        executor._on_order_status(trade_mock)
+
+        assert 44 in executor._active_orders

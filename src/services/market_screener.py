@@ -205,3 +205,74 @@ class MarketScreener:
             "UNP", "RTX", "HON", "LOW", "ORCL", "INTC", "AMD", "QCOM", "IBM",
             "CAT", "GS", "BA", "AMGN", "SBUX",
         ]
+
+    def get_ftse100_symbols(self) -> List[str]:
+        """Fetch FTSE 100 constituent symbols for EU trading.
+        
+        Returns symbols with .L suffix for London Stock Exchange.
+        Falls back to a hardcoded top-30 list if fetch fails.
+        """
+        try:
+            import pandas as pd
+            url = "https://en.wikipedia.org/wiki/FTSE_100_Index"
+            tables = pd.read_html(url)
+            # The constituents table typically has a 'Ticker' or 'EPIC' column
+            for table in tables:
+                for col in ["Ticker", "EPIC", "ticker", "epic"]:
+                    if col in table.columns:
+                        symbols = [str(s).strip() + ".L" for s in table[col].tolist() if str(s).strip()]
+                        if len(symbols) > 20:
+                            logger.info("Loaded %d FTSE 100 symbols", len(symbols))
+                            return symbols
+            raise ValueError("Could not find ticker column in FTSE 100 table")
+        except Exception as exc:
+            logger.warning("Failed to fetch FTSE 100 list: %s — using fallback", exc)
+            return self._fallback_eu_symbols()
+
+    def get_nikkei225_symbols(self) -> List[str]:
+        """Get top Nikkei 225 symbols for ASIA trading.
+        
+        Returns symbols with .T suffix for Tokyo Stock Exchange.
+        Uses a curated list (Nikkei 225 Wikipedia page is harder to parse).
+        """
+        return self._fallback_asia_symbols()
+
+    @staticmethod
+    def _fallback_eu_symbols() -> List[str]:
+        """Fallback: top 30 FTSE 100 by market cap with .L suffix."""
+        return [
+            "SHEL.L", "AZN.L", "ULVR.L", "HSBA.L", "BP.L",
+            "RIO.L", "GSK.L", "DGE.L", "BATS.L", "REL.L",
+            "LSEG.L", "AAL.L", "BHP.L", "VOD.L", "NG.L",
+            "PRU.L", "CPG.L", "EXPN.L", "CRH.L", "AHT.L",
+            "RKT.L", "BARC.L", "LLOY.L", "GLEN.L", "IMB.L",
+            "SSE.L", "ABF.L", "ANTO.L", "TSCO.L", "WPP.L",
+        ]
+
+    @staticmethod
+    def _fallback_asia_symbols() -> List[str]:
+        """Fallback: top 20 Nikkei 225 by market cap with .T suffix."""
+        return [
+            "7203.T", "6758.T", "9984.T", "8306.T", "6861.T",
+            "9432.T", "6501.T", "7267.T", "4502.T", "6902.T",
+            "8035.T", "6098.T", "4063.T", "7974.T", "9433.T",
+            "3382.T", "8058.T", "2914.T", "4568.T", "6367.T",
+        ]
+
+    def screen_for_session(self, session: str) -> List[str]:
+        """Screen symbols for a specific trading session.
+        
+        Args:
+            session: "US", "EU", or "ASIA"
+        
+        Returns:
+            Top N candidates for the given session.
+        """
+        if session == "EU":
+            symbols = self.get_ftse100_symbols()
+        elif session == "ASIA":
+            symbols = self.get_nikkei225_symbols()
+        else:
+            symbols = self.get_sp500_symbols()
+        
+        return self.screen(symbols=symbols)

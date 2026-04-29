@@ -52,6 +52,23 @@ _BEARISH_KEYWORDS = [
     "tariff",
     "war",
     "sanctions",
+    "invade",
+    "invasion",
+    "conflict",
+    "attack",
+    "missile",
+    "nuclear",
+    "impeach",
+    "indicted",
+    "convicted",
+    "ban",
+    "restrict",
+    "collapse",
+    "bankrupt",
+    "crisis",
+    "sell-off",
+    "selloff",
+    "downgrade",
 ]
 
 # Keywords that indicate bullish market conditions
@@ -72,6 +89,23 @@ _BULLISH_KEYWORDS = [
     "inflation drop",
     "trade deal",
     "peace",
+    "ceasefire",
+    "deal",
+    "agreement",
+    "treaty",
+    "elected",
+    "win",
+    "approve",
+    "pass",
+    "release",
+    "launch",
+    "ipo",
+    "upgrade",
+    "record high",
+    "all-time high",
+    "bitcoin",
+    "$1m",
+    "trillion",
 ]
 
 
@@ -331,7 +365,22 @@ class PolymarketService:
     def _classify_direction(question_lower: str) -> int:
         """Classify a market question as bullish (+1), bearish (-1), or
         neutral (0) based on keyword matching.
+
+        Skips sports, entertainment, and other non-financial markets.
         """
+        # Skip non-financial markets
+        skip_keywords = [
+            "nhl", "nba", "nfl", "mlb", "fifa", "world cup", "stanley cup",
+            "super bowl", "finals", "championship", "premier league",
+            "champions league", "oscar", "grammy", "emmy", "gta vi",
+            "album", "movie", "song", "rihanna", "drake", "taylor swift",
+            "carti", "jesus christ", "weinstein", "sentenced",
+            "nomination", "nominee", "democratic", "republican",
+            "megaeth", "market cap", "fdv",
+        ]
+        if any(kw in question_lower for kw in skip_keywords):
+            return 0
+
         bearish_count = sum(
             1 for kw in _BEARISH_KEYWORDS if kw in question_lower
         )

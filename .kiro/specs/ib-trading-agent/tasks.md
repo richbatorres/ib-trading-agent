@@ -627,3 +627,8 @@ Build an autonomous AI trading agent for Interactive Brokers from scratch. The i
     - Sentiment now correctly filters non-financial noise
     - **Conclusion:** Polymarket has limited financial market coverage; sentiment will be 0.0 when no relevant markets exist (by design — secondary factor only)
     - _Requirements: 13.1, 13.2, 13.3_
+  - [x] 28.13 Fix overnight reconnection failure
+    - **Root cause:** Main loop used `time.sleep(15)` (blocking) when IB disconnected, which blocked the asyncio event loop and prevented ConnectionManager._on_disconnected() from executing
+    - **Fix:** Replaced with `await asyncio.sleep(5)` + active reconnect via `agent._connection_manager.connect()` with 30s backoff
+    - Agent now actively reconnects instead of passively waiting for ConnectionManager
+    - _Requirements: 1.2, 1.3_

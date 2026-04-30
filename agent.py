@@ -121,22 +121,27 @@ async def _run_agent_loop(config: AgentConfig) -> None:
                         if ib.isConnected():
                             ib.sleep(10)
                         else:
-                            # IB disconnected — keep polling Yahoo, wait for reconnect
-                            # ConnectionManager._on_disconnected handles reconnection
-                            # automatically. We just poll Yahoo and wait.
-                            logger.warning("IB disconnected — collecting Yahoo data, waiting for Gateway...")
+                            # IB disconnected — poll Yahoo and try to reconnect
+                            logger.warning("IB disconnected — collecting Yahoo data, attempting reconnect...")
                             if yahoo:
                                 yahoo.poll()
-                            _time.sleep(15)
 
-                            # Check if ConnectionManager reconnected us
-                            if ib.isConnected():
-                                ib.sleep(2)  # sync account data
-                                total_value, cash = agent._read_portfolio_from_ib()
-                                if total_value > 0:
-                                    agent._risk_manager.update_portfolio(total_value, cash)
-                                    logger.info("Portfolio re-initialized after reconnect: value=%.2f, cash=%.2f", total_value, cash)
-                                logger.info("IB Gateway reconnected!")
+                            # Use asyncio.sleep to keep event loop alive for async reconnect
+                            await asyncio.sleep(5)
+
+                            # Actively try to reconnect (don't just wait for ConnectionManager)
+                            if not ib.isConnected():
+                                try:
+                                    await agent._connection_manager.connect()
+                                    ib.sleep(2)  # sync account data
+                                    total_value, cash = agent._read_portfolio_from_ib()
+                                    if total_value > 0:
+                                        agent._risk_manager.update_portfolio(total_value, cash)
+                                        logger.info("Portfolio re-initialized after reconnect: value=%.2f, cash=%.2f", total_value, cash)
+                                    logger.info("IB Gateway reconnected!")
+                                except Exception as exc:
+                                    logger.debug("Reconnect attempt failed: %s", exc)
+                                    await asyncio.sleep(25)  # wait before next attempt
 
                     except (KeyboardInterrupt, SystemExit):
                         raise

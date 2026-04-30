@@ -632,3 +632,8 @@ Build an autonomous AI trading agent for Interactive Brokers from scratch. The i
     - **Fix:** Replaced with `await asyncio.sleep(5)` + active reconnect via `agent._connection_manager.connect()` with 30s backoff
     - Agent now actively reconnects instead of passively waiting for ConnectionManager
     - _Requirements: 1.2, 1.3_
+  - [x] 28.14 Fix LSE order rejection (Error 10311 / 201)
+    - **Root cause:** `_make_contract()` used direct `LSE` exchange routing for .L symbols, but IB paper account has a preset restriction that blocks direct-routed LSE orders (Error 10311: "Direct routed orders may result in higher trade fees")
+    - **Fix:** Changed all non-US contracts to use `SMART` routing instead of direct exchange (LSE/TSE). SMART routing lets IB choose the best execution venue and avoids the restriction.
+    - All EU (.L) and ASIA (.T) orders now route via SMART with correct currency (GBP/JPY)
+    - _Requirements: 10.1_

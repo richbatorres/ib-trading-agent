@@ -21,17 +21,20 @@ _MAX_HISTORY_LEN = 100
 def _make_contract(symbol: str) -> Stock:
     """Create an IB Stock contract with exchange/currency based on symbol suffix.
     
-    - Symbols ending in .L → LSE exchange, GBP currency (London)
-    - Symbols ending in .T → TSE exchange, JPY currency (Tokyo)
+    - Symbols ending in .L → SMART exchange, GBP currency (London via SMART routing)
+    - Symbols ending in .T → SMART exchange, JPY currency (Tokyo via SMART routing)
     - All others → SMART exchange, USD currency (US)
+    
+    Uses SMART routing for all exchanges to avoid IB paper account
+    restrictions on direct-routed orders (Error 10311).
     """
     upper = symbol.upper()
     if upper.endswith(".L"):
-        # London Stock Exchange — strip suffix for IB
-        return Stock(symbol.replace(".L", "").replace(".l", ""), "LSE", "GBP")
+        # London — use SMART routing with GBP to avoid direct LSE routing restriction
+        return Stock(symbol.replace(".L", "").replace(".l", ""), "SMART", "GBP")
     elif upper.endswith(".T"):
-        # Tokyo Stock Exchange — strip suffix for IB
-        return Stock(symbol.replace(".T", "").replace(".t", ""), "TSE", "JPY")
+        # Tokyo — use SMART routing with JPY
+        return Stock(symbol.replace(".T", "").replace(".t", ""), "SMART", "JPY")
     else:
         return Stock(symbol, "SMART", "USD")
 

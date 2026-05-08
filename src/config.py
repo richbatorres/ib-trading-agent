@@ -38,6 +38,10 @@ class AgentConfig:
     max_position_age_days: int = 5  # Close position after N days regardless of P&L
     profit_target_pct: float = 3.0  # Close position when profit reaches N%
     max_loss_exit_pct: float = 3.0  # Close position when loss exceeds N% (before stop-loss)
+    # Portfolio rotation
+    rotation_threshold: float = 0.20  # Min confidence difference to justify rotation
+    commission_per_trade: float = 1.50  # Estimated commission per trade (USD)
+    min_trade_profit_after_commission: float = 5.0  # Min expected profit after commission to justify trade (USD)
 
     @classmethod
     def from_env(cls, path: str = ".env") -> "AgentConfig":
@@ -86,4 +90,7 @@ class AgentConfig:
             max_position_age_days=int(values.get("MAX_POSITION_AGE_DAYS", "5")),
             profit_target_pct=float(values.get("PROFIT_TARGET_PCT", "3.0")),
             max_loss_exit_pct=float(values.get("MAX_LOSS_EXIT_PCT", "3.0")),
+            rotation_threshold=float(values.get("ROTATION_THRESHOLD", "0.20")),
+            commission_per_trade=float(values.get("COMMISSION_PER_TRADE", "1.50")),
+            min_trade_profit_after_commission=float(values.get("MIN_TRADE_PROFIT_AFTER_COMMISSION", "5.0")),
         )

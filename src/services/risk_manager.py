@@ -368,6 +368,7 @@ class RiskManager:
         entry_price: float,
         current_price: float,
         stop_loss_price: float,
+        entry_confidence: float = 0.65,
     ) -> None:
         """Update or add a position in the open positions tracker."""
         import time as _time
@@ -378,6 +379,7 @@ class RiskManager:
             "current_price": current_price,
             "stop_loss_price": stop_loss_price,
             "entry_time": existing["entry_time"] if existing and "entry_time" in existing else _time.time(),
+            "entry_confidence": existing["entry_confidence"] if existing and "entry_confidence" in existing else entry_confidence,
         }
 
     def remove_position(self, symbol: str) -> None:
@@ -427,6 +429,104 @@ class RiskManager:
                 exits.append((symbol, f"loss={pnl_pct:.1f}% <= max_loss=-{self._config.max_loss_exit_pct}%"))
 
         return exits
+
+    def find_rotation_candidate(self, new_signal_confidence: float) -> Optional[str]:
+        """Find the weakest position to rotate out if a stronger signal exists.
+
+        Returns the symbol of the weakest position if:
+        1. Portfolio is fully allocated (>= 90% exposure)
+        2. The new signal's confidence exceeds the weakest position's
+           entry confidence by at least ROTATION_THRESHOLD
+        3. The rotation is profitable after commission costs
+
+        Returns None if no rotation is justified.
+        """
+        if not self._open_positions:
+            return None
+
+        # Only rotate when portfolio is near-full
+        total_positions_value = sum(
+            abs(p.get("quantity", 0) * p.get("current_price", p.get("entry_price", 0)))
+            for p in self._open_positions.values()
+        )
+        max_exposure = (self._MAX_TOTAL_EXPOSURE_PCT / 100.0) * self._current_portfolio_value
+        if total_positions_value < max_exposure * 0.85:
+            # Portfolio has room — no need to rotate
+            return None
+
+        # Find weakest position by entry confidence (stored at entry)
+        weakest_symbol = None
+        weakest_confidence = 1.0
+
+        for symbol, pos in self._open_positions.items():
+            conf = pos.get("entry_confidence", 0.65)
+            if conf < weakest_confidence:
+                weakest_confidence = conf
+                weakest_symbol = symbol
+
+        if weakest_symbol is None:
+            return None
+
+        # Check if confidence difference justifies rotation
+        confidence_diff = new_signal_confidence - weakest_confidence
+        if confidence_diff < self._config.rotation_threshold:
+            return None
+
+        # Check cooldown — don't rotate same position within 24h
+        import time as _time
+        last_trade = self._last_trade_time.get(weakest_symbol, 0)
+        if _time.time() - last_trade < 86400:  # 24h cooldown for rotation
+            return None
+
+        logger.info(
+            "Rotation candidate: %s (confidence=%.2f) → new signal (confidence=%.2f), diff=%.2f >= threshold=%.2f",
+            weakest_symbol, weakest_confidence, new_signal_confidence,
+            confidence_diff, self._config.rotation_threshold,
+        )
+        return weakest_symbol
+
+    def is_trade_profitable_after_commission(
+        self, price: float, quantity: int, expected_gain_pct: float
+    ) -> bool:
+        """Check if a trade is worth executing after commission costs.
+
+        A trade is only worthwhile if the expected profit exceeds
+        the round-trip commission cost (buy + sell) plus a minimum
+        profit threshold.
+
+        Parameters
+        ----------
+        price : float
+            Entry price per share.
+        quantity : int
+            Number of shares.
+        expected_gain_pct : float
+            Expected gain percentage (from signal confidence mapping).
+
+        Returns
+        -------
+        bool
+            True if expected profit > commission + min threshold.
+        """
+        if quantity <= 0 or price <= 0:
+            return False
+
+        position_value = price * quantity
+        expected_profit = position_value * (expected_gain_pct / 100.0)
+        # Round-trip commission: buy + sell
+        total_commission = self._config.commission_per_trade * 2
+        net_profit = expected_profit - total_commission
+
+        if net_profit < self._config.min_trade_profit_after_commission:
+            logger.info(
+                "Trade not profitable after commission: expected_profit=%.2f, "
+                "commission=%.2f, net=%.2f < min=%.2f",
+                expected_profit, total_commission, net_profit,
+                self._config.min_trade_profit_after_commission,
+            )
+            return False
+
+        return True
 
     def calculate_volatility_adjusted_size(self, price: float, atr: float) -> int:
         """Calculate position size adjusted for volatility using ATR.

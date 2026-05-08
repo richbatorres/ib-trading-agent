@@ -465,7 +465,49 @@ class TradingAgent:
             # 2. Evaluate signal against risk limits
             approved = self._risk_manager.evaluate_signal(signal)
             if approved is None:
-                return
+                # Portfolio might be full — try rotation if signal is strong enough
+                if signal.direction == "BUY" and signal.confidence >= self._MIN_CONFIDENCE:
+                    rotation_symbol = self._risk_manager.find_rotation_candidate(signal.confidence)
+                    if rotation_symbol:
+                        # Check if rotation is profitable after commission
+                        quantity_estimate = self._risk_manager.calculate_position_size(signal.price)
+                        expected_gain = (signal.confidence - 0.5) * 10  # rough: 0.65 conf → 1.5% gain
+                        if quantity_estimate > 0 and self._risk_manager.is_trade_profitable_after_commission(
+                            signal.price, quantity_estimate, expected_gain
+                        ):
+                            logger.info(
+                                "Portfolio rotation: selling %s to buy %s (confidence %.2f > threshold)",
+                                rotation_symbol, signal.symbol, signal.confidence,
+                            )
+                            # Sell the weak position
+                            pos = self._risk_manager._open_positions[rotation_symbol]
+                            from src.models.domain import TradeSignal as _TS
+                            sell_signal = _TS(
+                                symbol=rotation_symbol, direction="SELL", strategy="rotation",
+                                confidence=1.0, price=pos["current_price"], volume=0.0,
+                                indicators={}, polymarket_sentiment=0.0, timestamp=datetime.now(),
+                            )
+                            sell_approved = self._risk_manager.evaluate_signal(sell_signal)
+                            if sell_approved:
+                                await self._order_executor.execute_trade(sell_approved)
+                                self._risk_manager.remove_position(rotation_symbol)
+                                # Now retry the original BUY
+                                approved = self._risk_manager.evaluate_signal(signal)
+
+                if approved is None:
+                    return
+
+            # 2b. Commission check for BUY signals
+            if signal.direction == "BUY" and approved:
+                expected_gain = (signal.confidence - 0.5) * 10
+                if not self._risk_manager.is_trade_profitable_after_commission(
+                    signal.price, approved.quantity, expected_gain
+                ):
+                    logger.info(
+                        "Trade skipped for %s: not profitable after commission",
+                        signal.symbol,
+                    )
+                    return
 
             # 3. Execute the trade
             await self._order_executor.execute_trade(approved)
@@ -475,6 +517,7 @@ class TradingAgent:
                 self._risk_manager.update_position(
                     signal.symbol, approved.quantity, signal.price,
                     signal.price, approved.stop_loss_price,
+                    entry_confidence=signal.confidence,
                 )
             elif signal.direction == "SELL":
                 self._risk_manager.remove_position(signal.symbol)

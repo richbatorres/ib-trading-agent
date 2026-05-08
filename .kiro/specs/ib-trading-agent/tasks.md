@@ -646,3 +646,11 @@ Build an autonomous AI trading agent for Interactive Brokers from scratch. The i
     - Configurable via .env: MAX_POSITION_AGE_DAYS, PROFIT_TARGET_PCT, MAX_LOSS_EXIT_PCT
     - Generates synthetic SELL signals through normal pipeline (RiskManager → OrderExecutor)
     - _Requirements: 9.1, 11.1_
+  - [x] 28.16 Portfolio rotation and commission-aware trading
+    - **Portfolio rotation:** When portfolio is full (>85% allocated) and a new BUY signal has confidence significantly higher than the weakest held position (diff >= ROTATION_THRESHOLD=0.20), agent sells the weakest and buys the stronger opportunity
+    - 24h cooldown prevents ping-pong rotation on same symbol
+    - **Commission awareness:** `is_trade_profitable_after_commission()` checks if expected profit exceeds round-trip commission ($1.50×2) + minimum threshold ($5.00) before executing
+    - Trades that don't clear the commission hurdle are skipped
+    - Entry confidence stored per position for rotation comparison
+    - Configurable: ROTATION_THRESHOLD, COMMISSION_PER_TRADE, MIN_TRADE_PROFIT_AFTER_COMMISSION
+    - _Requirements: 12.1, 12.2_

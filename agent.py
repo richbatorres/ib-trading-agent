@@ -96,9 +96,14 @@ async def _run_agent_loop(config: AgentConfig) -> None:
                 if mdt == "yahoo" and yahoo is None:
                     from src.services.yahoo_data_provider import YahooDataProvider
                     watchlist = agent._market_data._watchlist
-                    yahoo = YahooDataProvider(watchlist)
+                    # LSE symbols are covered by IB real-time streaming — skip in Yahoo
+                    lse_symbols = {s for s in watchlist if s.upper().endswith(".L")}
+                    yahoo = YahooDataProvider(watchlist, ib_streaming_symbols=lse_symbols)
                     yahoo.set_tick_callback(agent._on_tick)
-                    logger.info("Yahoo provider created for %d symbols", len(watchlist))
+                    logger.info(
+                        "Yahoo provider created for %d symbols (%d on IB streaming, %d on Yahoo)",
+                        len(watchlist), len(lse_symbols), len(watchlist) - len(lse_symbols),
+                    )
 
                 # Load Yahoo history on first successful connection
                 if yahoo:

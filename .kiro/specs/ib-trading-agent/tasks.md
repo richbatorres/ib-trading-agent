@@ -637,3 +637,12 @@ Build an autonomous AI trading agent for Interactive Brokers from scratch. The i
     - **Fix:** Changed all non-US contracts to use `SMART` routing instead of direct exchange (LSE/TSE). SMART routing lets IB choose the best execution venue and avoids the restriction.
     - All EU (.L) and ASIA (.T) orders now route via SMART with correct currency (GBP/JPY)
     - _Requirements: 10.1_
+  - [x] 28.15 Position exit rules (time-based and profit-target)
+    - **Problem:** Agent buys but never sells — portfolio becomes fully allocated (>90%), blocking all new trades
+    - **Fix:** Added periodic exit check (every 5 min) that closes positions based on:
+      - Age: position held > MAX_POSITION_AGE_DAYS (default 5 days)
+      - Profit target: unrealized gain >= PROFIT_TARGET_PCT (default 3%)
+      - Loss exit: unrealized loss >= MAX_LOSS_EXIT_PCT (default 3%, before stop-loss)
+    - Configurable via .env: MAX_POSITION_AGE_DAYS, PROFIT_TARGET_PCT, MAX_LOSS_EXIT_PCT
+    - Generates synthetic SELL signals through normal pipeline (RiskManager → OrderExecutor)
+    - _Requirements: 9.1, 11.1_

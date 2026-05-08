@@ -171,12 +171,12 @@ class StrategyEngine:
                     any_active = True
                     break
             if not any_active and not self._market_hours.is_market_open():
-                logger.info(
+                logger.debug(
                     "Signal suppressed for %s: no configured session active", symbol
                 )
                 return None
         elif not self._market_hours.is_market_open():
-            logger.info(
+            logger.debug(
                 "Signal suppressed for %s: market is closed", symbol
             )
             return None

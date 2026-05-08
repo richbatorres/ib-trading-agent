@@ -370,11 +370,14 @@ class RiskManager:
         stop_loss_price: float,
     ) -> None:
         """Update or add a position in the open positions tracker."""
+        import time as _time
+        existing = self._open_positions.get(symbol)
         self._open_positions[symbol] = {
             "quantity": quantity,
             "entry_price": entry_price,
             "current_price": current_price,
             "stop_loss_price": stop_loss_price,
+            "entry_time": existing["entry_time"] if existing and "entry_time" in existing else _time.time(),
         }
 
     def remove_position(self, symbol: str) -> None:
@@ -382,6 +385,48 @@ class RiskManager:
         if symbol in self._open_positions:
             del self._open_positions[symbol]
             logger.info("Position removed for %s", symbol)
+
+    def get_positions_to_exit(self) -> list:
+        """Check all positions for exit conditions.
+
+        Returns a list of (symbol, reason) tuples for positions that
+        should be closed based on:
+        1. Age: position held longer than MAX_POSITION_AGE_DAYS
+        2. Profit target: unrealized gain >= PROFIT_TARGET_PCT
+        3. Loss exit: unrealized loss >= MAX_LOSS_EXIT_PCT (early exit before stop-loss)
+        """
+        import time as _time
+
+        exits = []
+        now = _time.time()
+        max_age_seconds = self._config.max_position_age_days * 86400
+
+        for symbol, pos in self._open_positions.items():
+            entry_price = pos.get("entry_price", 0)
+            current_price = pos.get("current_price", entry_price)
+            entry_time = pos.get("entry_time", now)
+
+            if entry_price <= 0:
+                continue
+
+            # 1. Age check
+            age_seconds = now - entry_time
+            if age_seconds > max_age_seconds:
+                age_days = age_seconds / 86400
+                exits.append((symbol, f"age={age_days:.1f}d > max={self._config.max_position_age_days}d"))
+                continue
+
+            # 2. Profit target
+            pnl_pct = (current_price - entry_price) / entry_price * 100
+            if pnl_pct >= self._config.profit_target_pct:
+                exits.append((symbol, f"profit={pnl_pct:.1f}% >= target={self._config.profit_target_pct}%"))
+                continue
+
+            # 3. Loss exit (early exit before stop-loss triggers)
+            if pnl_pct <= -self._config.max_loss_exit_pct:
+                exits.append((symbol, f"loss={pnl_pct:.1f}% <= max_loss=-{self._config.max_loss_exit_pct}%"))
+
+        return exits
 
     def calculate_volatility_adjusted_size(self, price: float, atr: float) -> int:
         """Calculate position size adjusted for volatility using ATR.

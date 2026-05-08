@@ -563,6 +563,15 @@ class TradingAgent:
             replace_existing=True,
         )
 
+        # Position exit check every 5 minutes during active sessions
+        self._scheduler.add_job(
+            self._check_position_exits,
+            IntervalTrigger(minutes=5),
+            id="position_exit_check",
+            name="Position exit check",
+            replace_existing=True,
+        )
+
         self._scheduler.start()
 
     async def _check_portfolio_loss(self) -> None:
@@ -579,6 +588,57 @@ class TradingAgent:
             self._risk_manager.update_portfolio(total_value, cash)
 
         await self._risk_manager.check_portfolio_loss()
+
+    async def _check_position_exits(self) -> None:
+        """Check positions for time-based and profit-target exits.
+
+        Runs every 5 minutes. For each position that meets exit criteria,
+        generates a SELL signal through the normal pipeline (RiskManager →
+        OrderExecutor).
+        """
+        configured = [s.strip() for s in self._config.trading_sessions.split(",")]
+        any_active = any(self._market_hours.is_session_active(s) for s in configured)
+        if not any_active and not self._market_hours.is_market_open():
+            return
+
+        exits = self._risk_manager.get_positions_to_exit()
+        if not exits:
+            return
+
+        logger.info("Position exit check: %d positions to close", len(exits))
+
+        for symbol, reason in exits:
+            pos = self._risk_manager._open_positions.get(symbol)
+            if not pos:
+                continue
+
+            quantity = pos["quantity"]
+            price = pos.get("current_price", pos["entry_price"])
+
+            logger.info(
+                "Closing position %s: %d shares @ %.2f (reason: %s)",
+                symbol, quantity, price, reason,
+            )
+
+            # Create a synthetic SELL signal
+            from src.models.domain import TradeSignal
+            sell_signal = TradeSignal(
+                symbol=symbol,
+                direction="SELL",
+                strategy="exit_rule",
+                confidence=1.0,
+                price=price,
+                volume=0.0,
+                indicators={},
+                polymarket_sentiment=0.0,
+                timestamp=datetime.now(),
+            )
+
+            # Evaluate through RiskManager (will approve SELL for existing position)
+            approved = self._risk_manager.evaluate_signal(sell_signal)
+            if approved:
+                await self._order_executor.execute_trade(approved)
+                self._risk_manager.remove_position(symbol)
 
     async def _take_portfolio_snapshot(self) -> None:
         """Take a portfolio snapshot — during any active configured session."""

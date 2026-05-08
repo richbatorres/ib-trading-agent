@@ -55,12 +55,32 @@ def setup_logging(level: str = "INFO") -> None:
 
     formatter = logging.Formatter(LOG_FORMAT)
 
-    # Console handler — writes to stdout
+    # Console handler — writes to stdout with error suppression for Google Drive
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(formatter)
 
     # Rotating file handler — rotates daily, keeps 30 backup files
-    file_handler = TimedRotatingFileHandler(
+    # Use a subclass that suppresses OSError on flush (Google Drive sync issue)
+    class SafeRotatingFileHandler(TimedRotatingFileHandler):
+        """TimedRotatingFileHandler that suppresses flush errors.
+
+        Google Drive file sync can cause OSError [Errno 22] on flush()
+        when the file is being synced. This is harmless — the data is
+        still written, just not flushed immediately.
+        """
+        def flush(self):
+            try:
+                super().flush()
+            except OSError:
+                pass
+
+        def emit(self, record):
+            try:
+                super().emit(record)
+            except OSError:
+                pass
+
+    file_handler = SafeRotatingFileHandler(
         filename=LOG_FILE,
         when="midnight",
         interval=1,

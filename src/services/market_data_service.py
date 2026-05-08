@@ -75,8 +75,11 @@ class MarketDataService:
         # Set market data type from config:
         # "1"=real-time (paid), "3"=delayed (free), "4"=frozen delayed (free), "yahoo"=skip
         if self._market_data_type == "yahoo":
-            logger.info("Market data type: yahoo — skipping IB market data subscriptions")
-            # Still qualify contracts for order execution
+            logger.info("Market data type: yahoo — using IB streaming for LSE symbols, Yahoo for rest")
+            # Subscribe LSE (.L) symbols to IB real-time (confirmed working on paper account)
+            # Qualify all contracts for order execution
+            lse_count = 0
+            self._ib.reqMarketDataType(1)  # Real-time for LSE
             for symbol in self._watchlist:
                 contract = _make_contract(symbol)
                 qualified = await self._ib.qualifyContractsAsync(contract)
@@ -84,6 +87,13 @@ class MarketDataService:
                     self._contracts[symbol] = qualified[0]
                     self._price_history[symbol] = deque(maxlen=_MAX_HISTORY_LEN)
                     self._volume_history[symbol] = deque(maxlen=_MAX_HISTORY_LEN)
+                    # Subscribe LSE symbols to IB streaming
+                    if symbol.upper().endswith(".L"):
+                        self._ib.reqMktData(qualified[0], genericTickList="233,165")
+                        lse_count += 1
+            if lse_count > 0:
+                self._ib.pendingTickersEvent += self.on_pending_tickers
+                logger.info("Subscribed %d LSE symbols to IB real-time streaming", lse_count)
             logger.info("Qualified %d contracts for order execution", len(self._contracts))
             return
 

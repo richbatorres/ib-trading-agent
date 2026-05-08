@@ -34,6 +34,10 @@ class AgentConfig:
     max_llm_calls_per_day: int = 10
     market_data_type: str = "4"  # "1"=real-time, "3"=delayed, "4"=frozen, "yahoo"=Yahoo Finance
     trading_sessions: str = "US"  # Comma-separated: "US", "US,EU", "US,EU,ASIA"
+    # Position exit rules
+    max_position_age_days: int = 5  # Close position after N days regardless of P&L
+    profit_target_pct: float = 3.0  # Close position when profit reaches N%
+    max_loss_exit_pct: float = 3.0  # Close position when loss exceeds N% (before stop-loss)
 
     @classmethod
     def from_env(cls, path: str = ".env") -> "AgentConfig":
@@ -79,4 +83,7 @@ class AgentConfig:
             max_llm_calls_per_day=int(values.get("MAX_LLM_CALLS_PER_DAY", "10")),
             market_data_type=values.get("MARKET_DATA_TYPE", "4"),
             trading_sessions=values.get("TRADING_SESSIONS", "US"),
+            max_position_age_days=int(values.get("MAX_POSITION_AGE_DAYS", "5")),
+            profit_target_pct=float(values.get("PROFIT_TARGET_PCT", "3.0")),
+            max_loss_exit_pct=float(values.get("MAX_LOSS_EXIT_PCT", "3.0")),
         )

@@ -26,8 +26,9 @@ class YahooDataProvider:
     through the same callback interface as MarketDataService.
     """
 
-    def __init__(self, watchlist: List[str]) -> None:
+    def __init__(self, watchlist: List[str], ib_streaming_symbols: Optional[set] = None) -> None:
         self._watchlist = watchlist
+        self._ib_streaming_symbols: set = ib_streaming_symbols or set()
         self._price_history: Dict[str, deque] = {}
         self._volume_history: Dict[str, deque] = {}
         self._callback: Optional[Callable] = None
@@ -52,6 +53,9 @@ class YahooDataProvider:
 
         updated = 0
         for symbol in self._watchlist:
+            # Skip symbols that are covered by IB real-time streaming
+            if symbol in self._ib_streaming_symbols:
+                continue
             try:
                 ticker = yf.Ticker(symbol)
                 # Get 1-minute bars for the last 1 day

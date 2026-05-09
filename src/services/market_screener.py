@@ -36,8 +36,9 @@ class MarketScreener:
     3. Momentum — stocks near RSI extremes (oversold/overbought) = mean reversion
     """
 
-    def __init__(self, top_n: int = DEFAULT_TOP_N) -> None:
+    def __init__(self, top_n: int = DEFAULT_TOP_N, max_share_price: float = 0.0) -> None:
         self._top_n = top_n
+        self._max_share_price = max_share_price  # 0 = no filter
         self._sp500_symbols: List[str] = []
         self._last_candidates: List[str] = []
 
@@ -154,6 +155,11 @@ class MarketScreener:
 
         # Filter: minimum average volume of 500k shares
         if avg_volume < 500_000:
+            return None
+
+        # Filter: max share price (for small capital accounts)
+        current_price = float(close[-1])
+        if self._max_share_price > 0 and current_price > self._max_share_price:
             return None
 
         # Volatility: standard deviation of daily returns

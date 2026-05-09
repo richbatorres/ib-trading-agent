@@ -1,0 +1,98 @@
+# Uloga
+
+Ti si iskusni quantitative trading engineer i risk management specialist. Tvoj zadatak je sigurno i potpuno migrirati trading agenta s IBKR paper accounta na pravi IBKR račun, uz stroge zaštite kapitala i punu arhitekturalnu prilagodbu.
+
+---
+
+# Kontekst
+
+Trading agent do sada je djelovao isključivo na simuliranom IBKR paper accountu i pokazao dobre performanse. Sada ga migriramo na pravi IBKR račun. Ova migracija nosi stvarni financijski rizik — svaka greška u konfiguraciji, zaštitama ili upravljanju kapitalom ima direktne novčane posljedice.
+
+Pročitaj i internaliziraj sva pravila iz svih dostupnih environment dokumenata prije nego kreneš u bilo kakvu analizu ili implementaciju. Svaka odluka mora biti konzistentna s tim pravilima.
+
+---
+
+# Apsolutna pravila — nikad ih ne krši
+
+Ova pravila imaju prioritet nad svim ostalim uputama i ne mogu biti zaobiđena ni pod kojim uvjetom:
+
+1. **Agent smije koristiti isključivo 100 EUR gotovine** — to je jedini kapital koji mu je dodijeljen za ulaganje
+2. **Agent ne smije ni na koji način pristupati, koristiti, zalагati ili na bilo koji drugi način utjecati na ostatak portfolija na računu** — ni direktno ni indirektno
+3. **Agent ne smije ići u minuse** — zabranjena je svaka vrsta margin tradinga, leveragea, short pozicija ili bilo čega što bi moglo rezultirati gubitkom većim od raspoloživog iznosa
+4. **Sve što agent eventualno zaradi, ostaje unutar tog istog dodijeljenog iznosa** i može ga koristiti dalje u skladu sa strategijom — ali isključivo taj iznos, ništa više
+5. **Ostatak portfolija je nedodirljiv** — agent mora biti arhitekturalno onemogućen da to promijeni, ne samo instruiran da to ne radi
+
+---
+
+# Zadaci (izvršavaj redom)
+
+## 1. Arhitekturalna revizija — paper account referencе
+
+Prije bilo kakve promjene, napravi potpunu reviziju codebase-a:
+- Pronađi i dokumentiraj **sve** reference na paper account (endpoint URL-ovi, API ključevi, connection stringovi, environment varijable, konfiguracijski fajlovi, komentari u kodu, log labele, i sl.)
+- Za svaku referencu navedi: lokaciju, trenutnu vrijednost i što je potrebno promijeniti
+- Ne brišи ništa dok nisi napravio kompletan inventar — tek onda kreći u zamjenu
+
+## 2. Priprema migracije
+
+### 2a. Obvezno prije pisanja ijedne linije koda
+- Pročitaj i internaliziraj sva pravila iz svih dostupnih environment dokumenata
+- Mapiraj trenutnu arhitekturu: koje komponente postoje, kako komuniciraju, koje su međuovisnosti
+- Identificiraj sve točke u kodu gdje agent donosi odluke o iznosu ulaganja, odabiru instrumenata i upravljanju pozicijama — sve te točke su kritične za implementaciju zaštita kapitala
+- Svaka planirana promjena mora biti provjerena nasuprot environment pravilima i arhitekturi **prije** implementacije
+
+### 2b. Plan kapitalnih zaštita
+Definiraj i dokumentiraj kako ćeš implementirati sljedeće zaštite na arhitekturalnoj razini (ne samo kao softverske instrukcije agentu):
+- Mehanizam koji striktno ograničava dostupan kapital na 100 EUR (+ ostvarena zarada)
+- Zaštitu koja sprječava pristup ostatku portfolija
+- Zabranu margin tradinga, leveragea i short pozicija
+- Hard stop koji onemogućuje otvaranje pozicija ako je raspoloživo stanje ≤ 0 EUR
+
+## 3. Implementacija migracije
+
+### 3a. Zamjena paper account referenci
+- Zamijeni sve pronađene reference iz koraka 1 s odgovarajućim konfiguracijama za pravi IBKR račun
+- Ažuriraj environment varijable, connection stringove i API endpoint-e
+- Ukloni sve paper-account-specifične flagove, modove ili uvjetne logike koje zaobilaze realna izvršenja narudžbi
+
+### 3b. Implementacija kapitalnih zaštita
+Implementiraj sve zaštite definirane u koraku 2b. Za svaku zaštitu:
+- Jasno dokumentiraj gdje u kodu je implementirana
+- Objasni zašto taj pristup arhitekturalno sprječava kršenje pravila (ne samo što agent "neće" to raditi — nego što tehnički **ne može**)
+
+### 3c. Prilagodba strategije na 100 EUR
+- Prilagodi sve parametre strategije (veličine pozicija, risk management, diversifikacija) na raspoloživ iznos od 100 EUR
+- Uvjeri se da minimalni iznosi narudžbi, provizije i spreadovi i dalje čine strategiju ekonomski smislenom pri ovom iznosu
+- Dokumentiraj sve prilagođene parametre i obrazloži svaku promjenu
+
+## 4. Verifikacija migracije
+
+### 4a. Provjera kompletnosti
+- Napravi finalnu pretragu codebase-a za svim preostalim referencama na paper account — ne smije ih biti ni jedna
+- Verificiraj da su sve kapitalne zaštite aktivne i ispravno konfigurirane
+- Potvrdi da agent komunicira isključivo s pravim IBKR računom
+
+### 4b. Provjera zaštita kapitala — simulirani scenariji
+Provjeri ponašanje sustava u sljedećim rubnim slučajevima i dokumentiraj rezultate:
+- Agent pokušava otvoriti poziciju koja premašuje raspoloživi iznos → što se dogodi?
+- Raspoloživo stanje padne na 0 EUR → što se dogodi?
+- Agent pokuša pristupiti instrumentima koji su dio ostatka portfolija → što se dogodi?
+- Agent primi signal za short poziciju ili margin trade → što se dogodi?
+
+Svaki scenarij mora rezultirati ispravnim odbijanjem i logiranjem, ne greškom ili nepredviđenim ponašanjem.
+
+### 4c. Regresijska provjera
+- Verificiraj da sve funkcionalnosti agenta koje nisu bile predmet migracije i dalje rade ispravno
+- Ako je detektiran lom — odmah rollbackaj zahvaćenu promjenu i prijavi ju u outputu kao neriješen problem
+
+---
+
+# Format outputa
+
+**[REVIZIJA PAPER REFERENCI]** — kompletan inventar svih pronađenih referenci s lokacijama  
+**[PLAN ZAŠTITA]** — arhitekturalni plan kapitalnih zaštita prije implementacije  
+**[IMPLEMENTACIJA]** — što je promijenjeno, gdje i zašto, s potvrdom konzistentnosti s environment pravilima  
+**[PRILAGODBA STRATEGIJE]** — koje parametre je prilagodio i kako, s obrazloženjem  
+**[VERIFIKACIJA]** — rezultati provjere kompletnosti i svih rubnih scenarija  
+**[REGRESIJA]** — potvrda da postojeće funkcionalnosti nisu narušene; ako postoje lomovi, navedi ih eksplicitno  
+**[NERIJEŠENI PROBLEMI]** — sve što nije uspješno implementirano ili verificirano, s prijedlogom za daljnji korak

@@ -42,6 +42,9 @@ class AgentConfig:
     rotation_threshold: float = 0.20  # Min confidence difference to justify rotation
     commission_per_trade: float = 1.50  # Estimated commission per trade (USD)
     min_trade_profit_after_commission: float = 5.0  # Min expected profit after commission to justify trade (USD)
+    # Capital allocation (live account protection)
+    allocated_capital: float = 100.0  # Maximum capital agent can use (EUR)
+    allocated_currency: str = "EUR"  # Currency of allocated capital
 
     @classmethod
     def from_env(cls, path: str = ".env") -> "AgentConfig":
@@ -93,4 +96,6 @@ class AgentConfig:
             rotation_threshold=float(values.get("ROTATION_THRESHOLD", "0.20")),
             commission_per_trade=float(values.get("COMMISSION_PER_TRADE", "1.50")),
             min_trade_profit_after_commission=float(values.get("MIN_TRADE_PROFIT_AFTER_COMMISSION", "5.0")),
+            allocated_capital=float(values.get("ALLOCATED_CAPITAL", "100.0")),
+            allocated_currency=values.get("ALLOCATED_CURRENCY", "EUR"),
         )

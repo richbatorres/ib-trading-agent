@@ -58,6 +58,7 @@ class RiskManager:
         """Validate a trade signal against risk limits in strict order.
 
         Risk checks:
+        0. Capital cap — reject if allocated capital exhausted (live mode)
         1. Hard stop — reject if active
         2. Cooldown — reject if traded this symbol recently
         3. Existing position — reject BUY if already holding, reject SELL if not holding
@@ -68,6 +69,15 @@ class RiskManager:
         8. Stop-loss readiness
         """
         import time as _time
+
+        # 0. CAPITAL PROTECTION (live mode): reject if no capital available
+        if self._config.environment == "live":
+            if self._current_cash <= 0 and signal.direction == "BUY":
+                logger.warning(
+                    "Trade REJECTED for %s: allocated capital exhausted (%.2f %s)",
+                    signal.symbol, self._current_cash, self._config.allocated_currency,
+                )
+                return None
 
         # 1. Hard stop
         if self._hard_stop_active:
@@ -317,14 +327,16 @@ class RiskManager:
 
         return False
 
-    def calculate_position_size(self, price: float) -> int:
+    def calculate_position_size(self, price: float) -> float:
         """Calculate the maximum number of shares to buy.
 
         max_shares = min(
             MAX_POSITION_SIZE_PCT/100 × portfolio_value / price,
             (cash − CASH_BUFFER_PCT/100 × portfolio_value) / price
         )
-        Returns max(0, floor(max_shares)).
+
+        In live mode: returns fractional shares (float) rounded to 4 decimals.
+        In paper mode: returns whole shares (floor to int).
 
         Requirement: 12.1, 12.2
         """
@@ -345,21 +357,50 @@ class RiskManager:
         max_by_cash = available_cash / price
 
         max_shares = min(max_by_position, max_by_cash)
-        return max(0, math.floor(max_shares))
+
+        # Live mode: allow fractional shares (IB supports for US stocks)
+        if self._config.environment == "live":
+            return max(0.0, round(max_shares, 4))
+        else:
+            return max(0, math.floor(max_shares))
 
     def update_portfolio(self, total_value: float, cash: float) -> None:
         """Update current portfolio value and cash balance.
 
+        On live accounts with ALLOCATED_CAPITAL set, the agent only
+        uses the allocated amount — not the full portfolio value.
+        This is an architectural hard cap that cannot be bypassed.
+
         Sets the initial portfolio value on first call.
         """
-        self._current_portfolio_value = total_value
-        self._current_cash = cash
+        # CAPITAL PROTECTION: On live accounts, cap to allocated capital
+        if self._config.environment == "live" and self._config.allocated_capital > 0:
+            # Agent's available capital is the MINIMUM of:
+            # - allocated_capital (hard cap from config)
+            # - actual cash available (can't spend what doesn't exist)
+            effective_value = min(self._config.allocated_capital, total_value)
+            effective_cash = min(self._config.allocated_capital, cash)
+            self._current_portfolio_value = effective_value
+            self._current_cash = effective_cash
 
-        if self._initial_portfolio_value is None:
-            self._initial_portfolio_value = total_value
-            logger.info(
-                "Initial portfolio value set to %.2f", total_value
-            )
+            if self._initial_portfolio_value is None:
+                self._initial_portfolio_value = effective_value
+                logger.info(
+                    "LIVE MODE: Capital capped at %.2f %s (full portfolio: %.2f)",
+                    effective_value,
+                    self._config.allocated_currency,
+                    total_value,
+                )
+        else:
+            # Paper mode: use full portfolio
+            self._current_portfolio_value = total_value
+            self._current_cash = cash
+
+            if self._initial_portfolio_value is None:
+                self._initial_portfolio_value = total_value
+                logger.info(
+                    "Initial portfolio value set to %.2f", total_value
+                )
 
     def update_position(
         self,

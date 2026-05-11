@@ -96,9 +96,8 @@ class TradingAgent:
         self._watchlist_manager = WatchlistManager(ib)
 
         # Market screener — scans S&P 500 daily for top candidates
-        # In live mode with small capital, filter by max share price
-        max_price = config.allocated_capital * (config.max_position_size_pct / 100.0) if config.environment == "live" else 0.0
-        self._screener = MarketScreener(top_n=30, max_share_price=max_price)
+        # Fractional shares enabled in live mode — no price filter needed
+        self._screener = MarketScreener(top_n=30)
 
         # Market data — subscribes to watchlist symbols (placeholder, updated after screening)
         self._market_data = MarketDataService(ib, _FALLBACK_WATCHLIST, market_data_type=config.market_data_type)

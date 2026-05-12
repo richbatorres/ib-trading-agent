@@ -696,26 +696,31 @@ class TradingAgent:
             logger.debug("Portfolio snapshot skipped — could not read IB values")
             return
 
+        # Update risk manager (applies capital cap in live mode)
+        self._risk_manager.update_portfolio(total_value, cash)
+
+        # Use capped values from RiskManager for snapshot (agent's view, not full portfolio)
+        agent_value = self._risk_manager._current_portfolio_value
+        agent_cash = self._risk_manager._current_cash
+
         ib = self._connection_manager.ib
-        positions_value = total_value - cash
-        num_positions = len(ib.positions())
+        positions_value = agent_value - agent_cash
+        # Count only agent's positions (not entire portfolio)
+        num_positions = len(self._risk_manager._open_positions)
 
         # Compute P&L from initial portfolio value
         initial = self._risk_manager._initial_portfolio_value
         total_pnl = 0.0
         total_pnl_pct = 0.0
         if initial and initial > 0:
-            total_pnl = total_value - initial
+            total_pnl = agent_value - initial
             total_pnl_pct = (total_pnl / initial) * 100.0
 
-        # Update risk manager with fresh values
-        self._risk_manager.update_portfolio(total_value, cash)
-
         snapshot = PortfolioSnapshot(
-            total_value=total_value,
-            cash_balance=cash,
+            total_value=agent_value,
+            cash_balance=agent_cash,
             positions_value=positions_value,
-            daily_pnl=total_pnl,  # Approximation: total P&L since start
+            daily_pnl=total_pnl,
             total_pnl=total_pnl,
             total_pnl_pct=total_pnl_pct,
             num_open_positions=num_positions,
